@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "odev"
+version = "2.0.0"
+description = "Agent système et code local, propulsé par Ollama"
+requires-python = ">=3.9"
+dependencies = [
+    "ollama>=0.4.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+odev = "odev.cli:main"
+
+[tool.setuptools]
+packages = ["odev"]
