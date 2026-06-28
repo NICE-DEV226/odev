@@ -16,21 +16,33 @@ except ImportError:
     sys.exit(1)
 
 from .config import load_config, save_config, SKILLS_DIR
+from .memory import (
+    load_memory,
+    save_memory,
+    set_project_summary,
+    add_task,
+    complete_task,
+    add_note,
+    render_memory,
+    build_memory_block,
+)
 from .logger import log
 from .skills import load_skills, SKILLS_REGISTRY
 from .sessions import list_sessions, save_session, load_session, delete_session
+from .agents import AGENT_TYPES, get_system_prompt
 from .agent import Agent
 from . import ui
 
-SYSTEM_PROMPT = """Tu es odev, un assistant système et de code de haut niveau opérant directement dans le terminal.
+SYSTEM_PROMPT_BASE = """Tu es odev, un assistant système et de code de haut niveau opérant directement dans le terminal.
 Tu es direct, pragmatique et extrêmement efficace. Tu réponds en français sauf si on te demande explicitement une autre langue.
 
 Tu disposes des outils suivants :
 - bash(command) : exécute n'importe quelle commande shell.
-- read_file / write_file / edit_file / list_dir : manipulation fine de fichiers (préfère edit_file pour des modifications ciblées plutôt que réécrire un fichier entier).
+- read_file / write_file / edit_file / apply_patch / list_dir : manipulation fine de fichiers (préfère apply_patch pour les changements multi-lignes, edit_file pour une substitution ciblée).
 - run_python(code) : exécute du Python isolé pour des calculs ou scripts ponctuels.
 - git(args) : sous-commandes git dans le dossier courant.
 - http_get(url) : récupère le contenu brut d'une page (lecture seule).
+- subagent(agent_type, task, context) : délègue une tâche à un sous-agent spécialisé (coder, reviewer, explorer, planner). Utilise-le pour diviser une tâche complexe ou pour changer de perspective.
 - skill_<nom> : capacités spécialisées chargées dynamiquement, vois /skills.
 
 Règles critiques :
@@ -39,7 +51,25 @@ Règles critiques :
 3. Avant une action destructrice ou irréversible, explique brièvement ce que tu vas faire.
 4. Reste concis dans tes explications. Pas de longs discours après l'exécution d'un outil.
 5. Si une commande échoue, analyse l'erreur et corrige plutôt que de répéter la même commande.
+6. Pour les tâches complexes, utilise subagent pour déléguer l'exploration, la revue ou la planification à des experts.
 """
+
+
+CURRENT_AGENT_TYPE = "auto"
+
+
+def build_system_prompt(memory: dict, agent_type: str = None) -> str:
+    base = SYSTEM_PROMPT_BASE
+    if agent_type and agent_type != "auto":
+        base = get_system_prompt(agent_type, base)
+    memory_block = build_memory_block(memory)
+    if not memory_block:
+        return base
+    return base + "\n\n" + memory_block
+    memory_block = build_memory_block(memory)
+    if not memory_block:
+        return SYSTEM_PROMPT_BASE
+    return SYSTEM_PROMPT_BASE + "\n\n" + memory_block
 
 SHELL_BUILTINS = {
     "ls", "ll", "la", "pwd", "cat", "less", "head", "tail", "grep", "find",
@@ -88,24 +118,32 @@ def confirm_callback(message: str) -> bool:
     return answer in ("o", "oui", "y", "yes")
 
 
-def make_agent(client, cfg) -> Agent:
+def make_agent(client, cfg, agent_type: str = "auto") -> Agent:
     return Agent(
-        client, cfg,
+        client, cfg, agent_type=agent_type,
         confirm_callback=confirm_callback,
         on_text=ui.show_text,
         on_tool_start=ui.show_tool_start,
         on_tool_result=ui.show_tool_result,
         on_thought=ui.show_thought,
+        on_stream_start=ui.start_stream,
+        on_stream_token=ui.stream_token,
+        on_stream_end=ui.end_stream,
     )
 
 
-def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, current_session: list):
+def apply_ui_style(style: str) -> str:
+    chosen = ui.set_style(style)
+    return chosen
+
+
+def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory: dict, agent_type: str = "auto"):
     parts = cmd.strip().split(None, 1)
     action = parts[0].lower()
 
     if action in ("/exit", "/quit", "/q"):
         if cfg.get("auto_save_session"):
-            save_session("_last", model, messages)
+            save_session("_last", model, messages, agent_type)
         ui.console.print("[dim]À bientôt.[/dim]")
         sys.exit(0)
 
@@ -151,9 +189,78 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, curren
         for e in errors:
             ui.console.print(f"[error]✗ {e}[/error]")
 
+    elif action == "/theme":
+        if len(parts) < 2:
+            ui.console.print(f"[dim]style actuel : {ui.get_style()}[/dim]")
+        else:
+            chosen = apply_ui_style(parts[1].strip())
+            cfg["ui_style"] = chosen
+            save_config(cfg)
+            ui.console.print(f"[success]✓ Style UI: {chosen}[/success]")
+
+    elif action == "/agent":
+        if len(parts) < 2:
+            ui.console.print(f"[dim]agent actuel : {agent_type}[/dim]")
+            ui.console.print(f"[dim]disponibles : {', '.join(AGENT_TYPES)}[/dim]")
+        else:
+            chosen = parts[1].strip().lower()
+            if chosen in AGENT_TYPES:
+                agent_type = chosen
+                messages[0]["content"] = build_system_prompt(memory, agent_type)
+                ui.console.print(f"[success]✓ Agent : {AGENT_TYPES[chosen]['name']}[/success]")
+            else:
+                ui.console.print(f"[warn]Agent inconnu. Disponibles : {', '.join(AGENT_TYPES)}[/warn]")
+
+    elif action == "/memory":
+        block = render_memory(memory)
+        ui.console.print(block or "[dim]Aucune mémoire persistante.[/dim]")
+
+    elif action == "/summary":
+        if len(parts) == 1:
+            ui.console.print(memory.get("project_summary") or "[dim]Aucun résumé projet défini.[/dim]")
+        else:
+            memory = set_project_summary(memory, parts[1].strip())
+            ui.console.print("[success]✓ Résumé projet mis à jour.[/success]")
+
+    elif action == "/tasks":
+        tasks = memory.get("active_tasks", [])
+        if not tasks:
+            ui.console.print("[dim]Aucune tâche active.[/dim]")
+        else:
+            for task in tasks:
+                status = "✓" if task.get("done") else "•"
+                ui.console.print(f"{status} #{task.get('id')} {task.get('title')}")
+
+    elif action == "/task":
+        if len(parts) < 2:
+            ui.console.print("[warn]Usage : /task <texte>[/warn]")
+        else:
+            memory = add_task(memory, parts[1].strip())
+            ui.console.print("[success]✓ Tâche ajoutée.[/success]")
+
+    elif action == "/done":
+        if len(parts) < 2:
+            ui.console.print("[warn]Usage : /done <id>[/warn]")
+        else:
+            try:
+                task_id = int(parts[1].strip())
+                if complete_task(memory, task_id):
+                    ui.console.print(f"[success]✓ Tâche #{task_id} marquée comme terminée.[/success]")
+                else:
+                    ui.console.print(f"[warn]Tâche #{task_id} introuvable.[/warn]")
+            except ValueError:
+                ui.console.print("[warn]L'identifiant doit être un nombre.[/warn]")
+
+    elif action == "/note":
+        if len(parts) < 2:
+            ui.console.print("[warn]Usage : /note <texte>[/warn]")
+        else:
+            memory = add_note(memory, parts[1].strip())
+            ui.console.print("[success]✓ Note enregistrée.[/success]")
+
     elif action == "/save":
         name = parts[1].strip() if len(parts) > 1 else "default"
-        path = save_session(name, model, messages)
+        path = save_session(name, model, messages, agent_type)
         ui.console.print(f"[success]✓ Session sauvegardée : {path}[/success]")
 
     elif action == "/load":
@@ -164,10 +271,11 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, curren
             if result is None:
                 ui.console.print(f"[error]✗ Session '{parts[1].strip()}' introuvable.[/error]")
             else:
-                loaded_model, loaded_messages = result
+                loaded_model, loaded_messages, loaded_agent = result
                 model = loaded_model or model
                 messages = loaded_messages
-                ui.console.print(f"[success]✓ Session chargée ({len(messages)} messages, modèle {model})[/success]")
+                agent_type = loaded_agent
+                ui.console.print(f"[success]✓ Session chargée ({len(messages)} messages, {model}, agent:{agent_type})[/success]")
 
     elif action == "/sessions":
         ui.show_sessions_table(list_sessions())
@@ -196,6 +304,8 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, curren
                     else:
                         cfg[key] = val
                     save_config(cfg)
+                    if key == "ui_style":
+                        apply_ui_style(str(cfg[key]))
                     ui.console.print(f"[success]✓ {key} = {cfg[key]}[/success]")
                 except ValueError:
                     ui.console.print(f"[error]✗ Valeur invalide pour {key}[/error]")
@@ -206,7 +316,12 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, curren
     else:
         ui.console.print(f"[warn]?[/warn] commande inconnue — [dim]/help[/dim]")
 
-    return model, messages
+    save_memory(memory)
+    if messages:
+        messages[0]["content"] = build_system_prompt(memory, agent_type)
+    else:
+        messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+    return model, messages, memory, agent_type
 
 
 def main():
@@ -218,6 +333,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config()
+    apply_ui_style(cfg.get("ui_style", "codex"))
     if args.model:
         cfg["model"] = args.model
     if args.host:
@@ -226,18 +342,25 @@ def main():
     client = ollama.Client(host=cfg["ollama_host"])
     model = check_model(client, cfg["model"])
     loaded, errors = load_skills()
+    memory = load_memory()
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    agent_type = "auto"
+    messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
     if args.resume:
         result = load_session("_last")
         if result:
-            model, messages = result
+            model, messages, agent_type = result
+            if not messages:
+                messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+            elif messages[0].get("role") != "system":
+                messages.insert(0, {"role": "system", "content": build_system_prompt(memory, agent_type)})
+            messages[0]["content"] = build_system_prompt(memory, agent_type)
 
-    ui.banner(model, loaded, os.getcwd())
+    ui.banner(model, loaded, os.getcwd(), memory=memory, agent_type=agent_type)
     for e in errors:
         ui.console.print(f"[error]✗ skill : {e}[/error]")
 
-    agent = make_agent(client, cfg)
+    agent = make_agent(client, cfg, agent_type)
 
     if args.message:
         msg = " ".join(args.message)
@@ -251,16 +374,17 @@ def main():
         except (EOFError, KeyboardInterrupt):
             ui.console.print("\n[dim]À bientôt.[/dim]")
             if cfg.get("auto_save_session"):
-                save_session("_last", model, messages)
+                save_session("_last", model, messages, agent_type)
             break
 
         if not inp:
             continue
 
         if inp.startswith("/"):
-            model, messages = handle_slash(inp, model, messages, client, cfg, messages)
+            model, messages, memory, agent_type = handle_slash(inp, model, messages, client, cfg, memory, agent_type)
             agent.cfg = cfg
             agent.runner.cfg = cfg
+            agent.agent_type = agent_type
             continue
 
         if is_shell_command(inp):
@@ -275,7 +399,7 @@ def main():
         messages = agent.turn(model, messages)
 
         if cfg.get("auto_save_session"):
-            save_session("_last", model, messages)
+            save_session("_last", model, messages, agent_type)
 
 
 if __name__ == "__main__":

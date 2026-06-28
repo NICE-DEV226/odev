@@ -6,8 +6,9 @@ gère le streaming, le fallback de parsing, et la compression d'historique.
 import re
 import json
 
-from .tools import ToolRunner, NATIVE_TOOL_SCHEMAS, NATIVE_TOOL_NAMES
+from .tools import ToolRunner, NATIVE_TOOL_SCHEMAS, NATIVE_TOOL_NAMES, SUBAGENT_TOOL_SCHEMA
 from .skills import skill_tool_schemas, run_skill, SKILLS_REGISTRY
+from .agents import get_system_prompt, get_allowed_tools
 from .logger import log
 
 
@@ -37,14 +38,31 @@ def strip_think(text: str):
 
 def extract_fallback_tool_calls(text: str) -> list:
     """Filet de sécurité quand le modèle ne fait pas de vrai tool-calling natif
-    mais émet des blocs ```bash``` ou du JSON pseudo-tool-call dans le texte."""
+    mais émet des blocs ```bash``` / ```json``` / ``` ou du JSON dans le texte."""
     results = []
 
+    # 1. Blocs ```bash / ```sh / ```shell explicites
     for m in re.finditer(r'```(?:bash|sh|shell)\s*\n(.*?)\n```', text, re.DOTALL | re.IGNORECASE):
         cmd = m.group(1).strip()
         if cmd:
             results.append(("bash", {"command": cmd}))
 
+    # 2. Blocs ``` sans langage — on essaie d'interpréter comme commande shell
+    for m in re.finditer(r'```\s*\n(.+?)\n```', text, re.DOTALL):
+        content = m.group(1).strip()
+        if not content:
+            continue
+        if content.startswith(("{", "[", "(")):
+            continue  # JSON, liste, tuple — pas une commande
+        if "<" in content and ">" in content:
+            continue  # texte avec placements <...> — pas une commande
+        first_word = content.split()[0] if content.split() else ""
+        if not re.match(r'^[a-zA-Z0-9_\./\\-]+$', first_word):
+            continue  # ne ressemble pas à une commande shell
+        if '\n' not in content and len(content) < 200:
+            results.append(("bash", {"command": content}))
+
+    # 3. JSON dans des blocs ```json / ``` / ou en texte libre
     candidates = []
     for m in re.finditer(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL):
         candidates.append(m.group(1).strip())
@@ -66,9 +84,6 @@ def extract_fallback_tool_calls(text: str) -> list:
             elif "command" in args:
                 results.append(("bash", {"command": args["command"]}))
             else:
-                # Outil hallucinet par un petit modèle : on le fait quand même
-                # passer par dispatch() pour renvoyer un message d'erreur clair
-                # plutôt que de laisser le JSON brut s'afficher tel quel.
                 results.append((name, args))
         except json.JSONDecodeError:
             continue
@@ -77,14 +92,19 @@ def extract_fallback_tool_calls(text: str) -> list:
 
 
 def strip_fallback_blocks(text: str) -> str:
-    text = re.sub(r'```(?:json|bash|sh|shell)?\s*\{.*?\}\s*```', '', text, flags=re.DOTALL)
+    text = re.sub(r'```(?:json)?\s*\{.*?\}\s*```', '', text, flags=re.DOTALL)
     text = re.sub(r'```(?:bash|sh|shell)\s*\n.*?\n```', '', text, flags=re.DOTALL)
+    text = re.sub(r'```\s*\n.*?\n```', '', text, flags=re.DOTALL)
     text = re.sub(r'\{[^{}]*"(?:arguments|parameters)"\s*:\s*\{[^{}]*\}[^{}]*\}', '', text, flags=re.DOTALL)
     return text.strip()
 
 
-def build_tools() -> list:
-    return list(NATIVE_TOOL_SCHEMAS) + skill_tool_schemas()
+def build_tools(agent_type: str = "auto") -> list:
+    allowed = get_allowed_tools(agent_type)
+    schemas = NATIVE_TOOL_SCHEMAS if allowed is None else [
+        s for s in NATIVE_TOOL_SCHEMAS if s["function"]["name"] in allowed
+    ]
+    return list(schemas) + skill_tool_schemas()
 
 
 def trim_history(messages: list, max_messages: int) -> list:
@@ -100,23 +120,28 @@ def trim_history(messages: list, max_messages: int) -> list:
 
 
 class Agent:
-    def __init__(self, client, cfg: dict, confirm_callback=None, on_text=None, on_tool_start=None, on_tool_result=None, on_thought=None):
+    def __init__(self, client, cfg: dict, agent_type: str = "auto", confirm_callback=None, on_text=None, on_tool_start=None, on_tool_result=None, on_thought=None, on_stream_start=None, on_stream_token=None, on_stream_end=None):
         self.client = client
         self.cfg = cfg
+        self.agent_type = agent_type
         self.runner = ToolRunner(cfg, confirm_callback=confirm_callback)
         self.on_text = on_text or (lambda t: None)
         self.on_tool_start = on_tool_start or (lambda kind, payload: None)
         self.on_tool_result = on_tool_result or (lambda kind, result: None)
         self.on_thought = on_thought or (lambda t: None)
+        self.on_stream_start = on_stream_start or (lambda: None)
+        self.on_stream_token = on_stream_token or (lambda token: None)
+        self.on_stream_end = on_stream_end or (lambda: None)
 
     def call_model(self, model: str, messages: list):
-        tools = build_tools()
+        tools = build_tools(self.agent_type)
+        use_stream = bool(self.cfg.get("stream", True))
         try:
             resp = self.client.chat(
                 model=model,
                 messages=messages,
                 tools=tools,
-                stream=False,
+                stream=use_stream,
                 keep_alive=self.cfg.get("keep_alive", "10m"),
                 options={
                     "temperature": self.cfg.get("temperature", 0.1),
@@ -126,18 +151,50 @@ class Agent:
             )
         except Exception as e:
             log.error(f"appel modèle échoué: {e}")
-            return f"[Erreur Ollama] {e}", []
+            return f"[Erreur Ollama] {e}", [], False
 
-        msg = resp.message
-        raw_text = msg.content or ""
+        if use_stream:
+            raw_text_parts = []
+            tool_calls = []
+            started = False
+            for chunk in resp:
+                chunk_msg = getattr(chunk, "message", None)
+                if chunk_msg is None and isinstance(chunk, dict):
+                    chunk_msg = chunk.get("message")
+                if chunk_msg is None:
+                    continue
+
+                content = getattr(chunk_msg, "content", None)
+                if content is None and isinstance(chunk_msg, dict):
+                    content = chunk_msg.get("content")
+                if content:
+                    if not started:
+                        self.on_stream_start()
+                        started = True
+                    raw_text_parts.append(content)
+                    self.on_stream_token(content)
+
+                chunk_calls = getattr(chunk_msg, "tool_calls", None)
+                if chunk_calls is None and isinstance(chunk_msg, dict):
+                    chunk_calls = chunk_msg.get("tool_calls")
+                if chunk_calls:
+                    tool_calls = list(chunk_calls)
+
+            self.on_stream_end()
+            raw_text = "".join(raw_text_parts)
+            msg_tool_calls = tool_calls
+        else:
+            msg = resp.message
+            raw_text = msg.content or ""
+            msg_tool_calls = list(msg.tool_calls or [])
+
         text, thought = strip_think(raw_text)
         if thought:
             self.on_thought(thought)
 
         calls = []
-        native_calls = list(msg.tool_calls or [])
-        if native_calls:
-            for tc in native_calls:
+        if msg_tool_calls:
+            for tc in msg_tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments or {}
                 calls.append((name, args))
@@ -147,7 +204,7 @@ class Agent:
                 calls = fallback
                 text = strip_fallback_blocks(text)
 
-        return text, calls
+        return text, calls, use_stream
 
     def dispatch(self, name: str, args: dict) -> str:
         if name == "bash":
@@ -158,6 +215,8 @@ class Agent:
             return self.runner.write_file(args.get("path", ""), args.get("content", ""), args.get("mode", "overwrite"))
         if name == "edit_file":
             return self.runner.edit_file(args.get("path", ""), args.get("old", ""), args.get("new", ""), args.get("count", 1))
+        if name == "apply_patch":
+            return self.runner.apply_patch(args.get("patch", ""))
         if name == "list_dir":
             return self.runner.list_dir(args.get("path", "."))
         if name == "run_python":
@@ -166,10 +225,79 @@ class Agent:
             return self.runner.git(args.get("args", ""))
         if name == "http_get":
             return self.runner.http_get(args.get("url", ""))
+        if name == "subagent":
+            return self.run_subagent(
+                args.get("agent_type", "auto"),
+                args.get("task", ""),
+                args.get("context", ""),
+            )
         if name.startswith("skill_"):
             return run_skill(name[6:], args)
         known = ", ".join(sorted(NATIVE_TOOL_NAMES)) + (", " + ", ".join(f"skill_{s}" for s in SKILLS_REGISTRY) if SKILLS_REGISTRY else "")
         return f"Erreur : l'outil '{name}' n'existe pas. Outils disponibles : {known}."
+
+    def run_subagent(self, sub_agent_type: str, task: str, context: str = "") -> str:
+        """Crée un sous-agent spécialisé, exécute une tâche, retourne le résultat."""
+        sub_cfg = dict(self.cfg)
+        sub_cfg["max_loops"] = min(sub_cfg.get("max_loops", 24), 12)
+        sub_cfg["stream"] = True
+
+        sub_parts = []
+        sub_started = False
+
+        def on_sub_text(t):
+            nonlocal sub_parts
+            sub_parts.append(t)
+        def on_sub_tool_start(k, p):
+            pass
+        def on_sub_tool_result(k, r):
+            pass
+        def on_sub_thought(t):
+            self.on_thought(f"[{sub_agent_type}] {t}")
+        def on_sub_stream_start():
+            nonlocal sub_started
+            sub_started = True
+            self.on_stream_start()
+        def on_sub_stream_token(tok):
+            self.on_stream_token(tok)
+            sub_parts.append(tok)
+        def on_sub_stream_end():
+            self.on_stream_end()
+
+        sub_agent = Agent(
+            self.client, sub_cfg, agent_type=sub_agent_type,
+            on_text=on_sub_text,
+            on_tool_start=on_sub_tool_start,
+            on_tool_result=on_sub_tool_result,
+            on_thought=on_sub_thought,
+            on_stream_start=on_sub_stream_start,
+            on_stream_token=on_sub_stream_token,
+            on_stream_end=on_sub_stream_end,
+        )
+
+        prompt = get_system_prompt(sub_agent_type, "Tu es un sous-agent spécialisé. Réponds en français de manière concise.")
+        if context:
+            prompt += f"\n\nContexte fourni par l'agent principal:\n{context}"
+
+        sub_messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": task},
+        ]
+
+        self.on_tool_start(f"subagent:{sub_agent_type}", {"task": task[:120] + ("…" if len(task) > 120 else "")})
+
+        sub_messages = sub_agent.turn(self.cfg.get("model", "qwen2.5-coder:7b"), sub_messages)
+
+        result_parts = []
+        for msg in sub_messages:
+            if msg["role"] == "assistant" and msg.get("content", "").strip():
+                result_parts.append(msg["content"].strip())
+            if msg["role"] == "tool" and msg.get("content", "").strip():
+                result_parts.append(f"[{msg['name']}] {msg['content'].strip()}")
+
+        result = "\n".join(result_parts) if result_parts else "(aucun résultat)"
+        self.on_tool_result(f"subagent:{sub_agent_type}", result)
+        return result
 
     def turn(self, model: str, messages: list) -> list:
         """Exécute un tour complet (jusqu'à boucle max, réponse finale, ou répétition détectée)."""
@@ -181,7 +309,7 @@ class Agent:
         while loops < max_loops:
             loops += 1
             messages = trim_history(messages, self.cfg.get("max_history_messages", 60))
-            text, calls = self.call_model(model, messages)
+            text, calls, streamed = self.call_model(model, messages)
 
             if not calls:
                 if not text.strip():
@@ -203,11 +331,12 @@ class Agent:
                     self.on_text(empty_notice)
                     messages.append({"role": "assistant", "content": empty_notice})
                 else:
-                    self.on_text(text)
+                    if not streamed:
+                        self.on_text(text)
                     messages.append({"role": "assistant", "content": text})
                 return messages
 
-            if text.strip():
+            if text.strip() and not streamed:
                 self.on_text(text)
 
             # Détecte un appel identique répété (signe d'un modèle bloqué/trop petit)
@@ -244,6 +373,12 @@ class Agent:
                 result = self.dispatch(name, args)
                 self.on_tool_result(name, result)
                 messages.append({"role": "tool", "content": result, "name": name})
+
+            if repeat_count >= 1:
+                messages.append({
+                    "role": "user",
+                    "content": "Tu répètes la même commande. Ne refais pas d'appel outil. Donne ta réponse finale en français avec les résultats obtenus.",
+                })
 
         messages.append({
             "role": "assistant",

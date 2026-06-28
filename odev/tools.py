@@ -7,6 +7,7 @@ import os
 import re
 import json
 import subprocess
+import tempfile
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -134,9 +135,39 @@ class ToolRunner:
         except Exception as e:
             return f"Erreur édition : {e}"
 
+    def apply_patch(self, patch_text: str) -> str:
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as handle:
+                handle.write(patch_text)
+                patch_path = handle.name
+            try:
+                stripped = patch_text.lstrip()
+                strip_level = "1" if stripped.startswith("--- a/") or stripped.startswith("diff --git ") else "0"
+                command = ["patch", f"-p{strip_level}", "--forward", "--batch", "-i", patch_path]
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    cwd=self.cwd,
+                )
+                output = (result.stdout + (("\n" + result.stderr) if result.stderr else "")).strip()
+                if result.returncode != 0:
+                    return f"Erreur patch : {output or 'échec inconnu'}"
+                return output or "✓ Patch appliqué"
+            finally:
+                try:
+                    os.unlink(patch_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            return f"Erreur patch : {e}"
+
     def list_dir(self, path: str = ".") -> str:
         try:
-            p = self._resolve(path)
+            raw = path.strip() or "."
+            p = self._resolve(raw)
+            if not p.exists():
+                return f"Erreur : '{raw}' n'existe pas. Le dossier courant est '{self.cwd}'. Essaie 'list_dir(\".\")' ou 'bash(\"ls\")'."
             entries = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
             lines = []
             for e in entries:
@@ -158,8 +189,13 @@ class ToolRunner:
         log.info("run_python")
         try:
             r = subprocess.run(
-                ["python3", "-c", code],
+                ["python3", "-I", "-S", "-c", code],
                 capture_output=True, text=True, timeout=30, cwd=self.cwd,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": str(Path.home()),
+                    "LANG": os.environ.get("LANG", "C.UTF-8"),
+                },
             )
             out = (r.stdout + (("\n" + r.stderr) if r.stderr else "")).strip()
             return _truncate(out) if out else "(aucune sortie)"
@@ -187,7 +223,34 @@ class ToolRunner:
 
 
 # ── Schémas JSON exposés au modèle ──────────────────────────────────────────
-NATIVE_TOOL_SCHEMAS = [
+SUBAGENT_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "subagent",
+        "description": "Délègue une tâche à un sous-agent spécialisé (coder, reviewer, explorer, planner) et récupère son résultat. Utilise ça pour diviser une tâche complexe en sous-tâches confiées à des experts.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent_type": {
+                    "type": "string",
+                    "enum": ["coder", "reviewer", "explorer", "planner"],
+                    "description": "Type de sous-agent",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Description précise de la tâche",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Contexte utile au sous-agent (optionnel)",
+                },
+            },
+            "required": ["agent_type", "task"],
+        },
+    },
+}
+
+NATIVE_TOOL_SCHEMAS = [SUBAGENT_TOOL_SCHEMA,
     {
         "type": "function",
         "function": {
@@ -246,6 +309,20 @@ NATIVE_TOOL_SCHEMAS = [
                     "count": {"type": "integer", "description": "Nombre d'occurrences attendu (0 = ignorer la vérification).", "default": 1},
                 },
                 "required": ["path", "old", "new"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": "Applique un diff unifié sur le projet courant. Préfère cet outil pour les modifications multi-lignes ou les changements structurés.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string", "description": "Contenu complet du patch unifié."},
+                },
+                "required": ["patch"],
             },
         },
     },

@@ -18,6 +18,7 @@ def list_sessions() -> list:
             out.append({
                 "name": f.stem,
                 "model": data.get("model", "?"),
+                "agent_type": data.get("agent_type", "?"),
                 "n_messages": len(data.get("messages", [])),
                 "updated": data.get("updated", "?"),
             })
@@ -26,11 +27,12 @@ def list_sessions() -> list:
     return out
 
 
-def save_session(name: str, model: str, messages: list) -> Path:
+def save_session(name: str, model: str, messages: list, agent_type: str = "auto") -> Path:
     fpath = SESSIONS_DIR / f"{name}.json"
     payload = {
         "model": model,
         "messages": messages,
+        "agent_type": agent_type,
         "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     fpath.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -42,7 +44,7 @@ def load_session(name: str):
     if not fpath.exists():
         return None
     data = json.loads(fpath.read_text(encoding="utf-8"))
-    return data.get("model"), data.get("messages", [])
+    return data.get("model"), data.get("messages", []), data.get("agent_type", "auto")
 
 
 def delete_session(name: str) -> bool:

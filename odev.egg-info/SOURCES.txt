@@ -5,6 +5,7 @@ odev/agent.py
 odev/cli.py
 odev/config.py
 odev/logger.py
+odev/memory.py
 odev/sessions.py
 odev/skills.py
 odev/tools.py
@@ -15,3 +16,4 @@ odev.egg-info/dependency_links.txt
 odev.egg-info/entry_points.txt
 odev.egg-info/requires.txt
 odev.egg-info/top_level.txt
+tests/test_core.py

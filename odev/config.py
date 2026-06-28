@@ -2,13 +2,15 @@
 odev.config — Configuration centralisée, chargement/écriture du fichier config.json
 """
 
-import os
 import json
+import os
 from pathlib import Path
 
-ODEV_DIR     = Path.home() / ".config" / "odev"
+BASE_DIR     = Path(os.environ.get("ODEV_HOME", Path.home() / ".config" / "odev"))
+ODEV_DIR     = BASE_DIR
 SKILLS_DIR   = ODEV_DIR / "skills"
 SESSIONS_DIR = ODEV_DIR / "sessions"
+MEMORY_FILE  = ODEV_DIR / "memory.json"
 LOG_FILE     = ODEV_DIR / "odev.log"
 CONFIG_FILE  = ODEV_DIR / "config.json"
 HISTORY_FILE = ODEV_DIR / "shell_history"
@@ -28,6 +30,7 @@ DEFAULTS = {
     "confirm_dangerous": True,
     "stream": True,
     "auto_save_session": True,
+    "ui_style": "codex",
     "editor": os.environ.get("EDITOR", "nano"),
 }
 

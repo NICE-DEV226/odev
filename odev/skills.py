@@ -1,5 +1,5 @@
 """
-odev.skills — Chargement dynamique de skills Python depuis ~/.config/odev/skills/
+odev.skills — Chargement dynamique de skills Python depuis le projet et ~/.config/odev/skills/.
 Un skill est un module exposant : get_description() -> str, run(ctx, args) -> str
 Optionnel : get_schema() -> dict (propriétés JSON des arguments, sinon objet libre).
 """
@@ -12,6 +12,7 @@ from .config import SKILLS_DIR
 from .logger import log
 
 SKILLS_REGISTRY: dict = {}
+LOCAL_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
 _DEFAULT_SKILLS = {
     "sys_info.py": '''# Skill odev : informations système avancées
@@ -105,14 +106,27 @@ def _ensure_default_skills():
             fpath.write_text(content, encoding="utf-8")
 
 
+def _iter_skill_files() -> list:
+    sources = []
+    if LOCAL_SKILLS_DIR.exists():
+        sources.append(LOCAL_SKILLS_DIR)
+    sources.append(SKILLS_DIR)
+
+    ordered = {}
+    for source in sources:
+        for filepath in sorted(source.glob("*.py")):
+            ordered[filepath.name] = filepath
+    return [ordered[name] for name in sorted(ordered)]
+
+
 def load_skills() -> list:
     SKILLS_REGISTRY.clear()
     _ensure_default_skills()
     loaded, errors = [], []
-    for filepath in sorted(SKILLS_DIR.glob("*.py")):
+    for filepath in _iter_skill_files():
         name = filepath.stem
         try:
-            spec = importlib.util.spec_from_file_location(f"odev_skill_{name}", filepath)
+            spec = importlib.util.spec_from_file_location(f"odev_skill_{filepath.parent.name}_{name}", filepath)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             if hasattr(module, "run") and hasattr(module, "get_description"):
