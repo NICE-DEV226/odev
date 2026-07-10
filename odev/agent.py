@@ -41,61 +41,79 @@ def extract_fallback_tool_calls(text: str) -> list:
     mais émet des blocs ```bash``` / ```json``` / ``` ou du JSON dans le texte."""
     results = []
 
-    # 1. Blocs ```bash / ```sh / ```shell explicites
-    for m in re.finditer(r'```(?:bash|sh|shell)\s*\n(.*?)\n```', text, re.DOTALL | re.IGNORECASE):
-        cmd = m.group(1).strip()
-        if cmd:
-            results.append(("bash", {"command": cmd}))
+    # 1. Blocs ```json ou ```tool — format explicite demandé dans le prompt
+    json_candidates = []
+    for m in re.finditer(r'```(?:json|tool)\s*\n?(.*?)\n?```', text, re.DOTALL | re.IGNORECASE):
+        json_candidates.append(m.group(1).strip())
 
-    # 2. Blocs ``` sans langage — on essaie d'interpréter comme commande shell
-    for m in re.finditer(r'```\s*\n(.+?)\n```', text, re.DOTALL):
-        content = m.group(1).strip()
-        if not content:
-            continue
-        if content.startswith(("{", "[", "(")):
-            continue  # JSON, liste, tuple — pas une commande
-        if "<" in content and ">" in content:
-            continue  # texte avec placements <...> — pas une commande
-        first_word = content.split()[0] if content.split() else ""
-        if not re.match(r'^[a-zA-Z0-9_\./\\-]+$', first_word):
-            continue  # ne ressemble pas à une commande shell
-        if '\n' not in content and len(content) < 200:
-            results.append(("bash", {"command": content}))
-
-    # 3. JSON dans des blocs ```json / ``` / ou en texte libre
-    candidates = []
-    for m in re.finditer(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL):
-        candidates.append(m.group(1).strip())
-    if not candidates:
-        for m in re.finditer(r'(\{[^{}]*"(?:arguments|parameters)"\s*:\s*\{[^{}]*\}[^{}]*\})', text, re.DOTALL):
-            candidates.append(m.group(1).strip())
-
-    for raw in candidates:
+    for raw in json_candidates:
         try:
             obj = json.loads(raw)
             name = obj.get("name", "")
             args = obj.get("arguments") or obj.get("parameters") or {}
             if not name:
                 continue
-            if name in NATIVE_TOOL_NAMES:
+            if name in NATIVE_TOOL_NAMES or (name.startswith("skill_") and name[6:] in SKILLS_REGISTRY):
                 results.append((name, args))
-            elif name.startswith("skill_") and name[6:] in SKILLS_REGISTRY:
-                results.append((name, args))
-            elif "command" in args:
+                continue
+            if "command" in args:
                 results.append(("bash", {"command": args["command"]}))
-            else:
+        except json.JSONDecodeError:
+            pass
+
+    if results:
+        return results
+
+    # 2. Blocs ```bash / ```sh / ```shell explicites
+    for m in re.finditer(r'```(?:bash|sh|shell)\s*\n(.*?)\n```', text, re.DOTALL | re.IGNORECASE):
+        cmd = m.group(1).strip()
+        if cmd:
+            results.append(("bash", {"command": cmd}))
+
+    # 3. JSON en texte libre avec "name" + "arguments"
+    for m in re.finditer(r'(\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"(?:arguments|parameters)"\s*:\s*(\{[^{}]*\})[^{}]*\})', text, re.DOTALL):
+        try:
+            obj = json.loads(m.group(1))
+            name = obj.get("name", "")
+            args = obj.get("arguments") or obj.get("parameters") or {}
+            if name in NATIVE_TOOL_NAMES or (name.startswith("skill_") and name[6:] in SKILLS_REGISTRY):
                 results.append((name, args))
         except json.JSONDecodeError:
-            continue
+            pass
+
+    # 4. Pattern tool_name({"key": "val"}) que certains modèles émettent
+    known_tools = NATIVE_TOOL_NAMES | {f"skill_{s}" for s in SKILLS_REGISTRY}
+    for tool_name in known_tools:
+        pattern = rf'\b{re.escape(tool_name)}\s*\(\s*(\{{.*?\}})\s*\)'
+        for m in re.finditer(pattern, text, re.DOTALL):
+            try:
+                args = json.loads(m.group(1))
+                results.append((tool_name, args))
+            except json.JSONDecodeError:
+                pass
+
+    # 5. Blocs ``` sans langage — interprétés comme shell si ça ressemble à une commande
+    if not results:
+        for m in re.finditer(r'```\s*\n(.+?)\n```', text, re.DOTALL):
+            content = m.group(1).strip()
+            if not content or content.startswith(("{", "[", "(")):
+                continue
+            if "<" in content and ">" in content:
+                continue
+            first_word = content.split()[0] if content.split() else ""
+            if not re.match(r'^[a-zA-Z0-9_\./\\-]+$', first_word):
+                continue
+            if '\n' not in content and len(content) < 200:
+                results.append(("bash", {"command": content}))
 
     return results
 
 
 def strip_fallback_blocks(text: str) -> str:
-    text = re.sub(r'```(?:json)?\s*\{.*?\}\s*```', '', text, flags=re.DOTALL)
-    text = re.sub(r'```(?:bash|sh|shell)\s*\n.*?\n```', '', text, flags=re.DOTALL)
+    text = re.sub(r'```(?:json|tool)\s*\{.*?\}\s*```', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'```(?:bash|sh|shell)\s*\n.*?\n```', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'```\s*\n.*?\n```', '', text, flags=re.DOTALL)
-    text = re.sub(r'\{[^{}]*"(?:arguments|parameters)"\s*:\s*\{[^{}]*\}[^{}]*\}', '', text, flags=re.DOTALL)
+    text = re.sub(r'\{[^{}]*"name"\s*:\s*"[^"]+"\s*,[^{}]*"(?:arguments|parameters)"\s*:\s*\{[^{}]*\}[^{}]*\}', '', text, flags=re.DOTALL)
     return text.strip()
 
 
@@ -120,11 +138,11 @@ def trim_history(messages: list, max_messages: int) -> list:
 
 
 class Agent:
-    def __init__(self, client, cfg: dict, agent_type: str = "auto", confirm_callback=None, on_text=None, on_tool_start=None, on_tool_result=None, on_thought=None, on_stream_start=None, on_stream_token=None, on_stream_end=None):
+    def __init__(self, client, cfg: dict, agent_type: str = "auto", confirm_callback=None, on_bash_line=None, on_text=None, on_tool_start=None, on_tool_result=None, on_thought=None, on_stream_start=None, on_stream_token=None, on_stream_end=None):
         self.client = client
         self.cfg = cfg
         self.agent_type = agent_type
-        self.runner = ToolRunner(cfg, confirm_callback=confirm_callback)
+        self.runner = ToolRunner(cfg, confirm_callback=confirm_callback, on_bash_line=on_bash_line)
         self.on_text = on_text or (lambda t: None)
         self.on_tool_start = on_tool_start or (lambda kind, payload: None)
         self.on_tool_result = on_tool_result or (lambda kind, result: None)
@@ -207,30 +225,49 @@ class Agent:
         return text, calls, use_stream
 
     def dispatch(self, name: str, args: dict) -> str:
+        # Validation des paramètres requis avant exécution
+        required: dict[str, list[str]] = {
+            "bash": ["command"],
+            "read_file": ["path"],
+            "write_file": ["path", "content"],
+            "edit_file": ["path", "old", "new"],
+            "apply_patch": ["patch"],
+            "run_python": ["code"],
+            "git": ["args"],
+            "http_get": ["url"],
+            "question": ["question"],
+            "subagent": ["agent_type", "task"],
+        }
+        if name in required:
+            missing = [p for p in required[name] if not args.get(p)]
+            if missing:
+                return (
+                    f"Erreur d'appel de l'outil '{name}' : paramètre(s) manquant(s) : {', '.join(missing)}. "
+                    f"Réémets l'appel avec tous les paramètres requis : {required[name]}."
+                )
+
         if name == "bash":
-            return self.runner.bash(args.get("command", ""))
+            return self.runner.bash(args["command"])
         if name == "read_file":
-            return self.runner.read_file(args.get("path", ""), args.get("start"), args.get("end"))
+            return self.runner.read_file(args["path"], args.get("start"), args.get("end"))
         if name == "write_file":
-            return self.runner.write_file(args.get("path", ""), args.get("content", ""), args.get("mode", "overwrite"))
+            return self.runner.write_file(args["path"], args["content"], args.get("mode", "overwrite"))
         if name == "edit_file":
-            return self.runner.edit_file(args.get("path", ""), args.get("old", ""), args.get("new", ""), args.get("count", 1))
+            return self.runner.edit_file(args["path"], args["old"], args["new"], args.get("count", 1))
         if name == "apply_patch":
-            return self.runner.apply_patch(args.get("patch", ""))
+            return self.runner.apply_patch(args["patch"])
         if name == "list_dir":
             return self.runner.list_dir(args.get("path", "."))
         if name == "run_python":
-            return self.runner.run_python(args.get("code", ""))
+            return self.runner.run_python(args["code"])
         if name == "git":
-            return self.runner.git(args.get("args", ""))
+            return self.runner.git(args["args"])
         if name == "http_get":
-            return self.runner.http_get(args.get("url", ""))
+            return self.runner.http_get(args["url"])
+        if name == "question":
+            return self.runner.question(args["question"])
         if name == "subagent":
-            return self.run_subagent(
-                args.get("agent_type", "auto"),
-                args.get("task", ""),
-                args.get("context", ""),
-            )
+            return self.run_subagent(args["agent_type"], args["task"], args.get("context", ""))
         if name.startswith("skill_"):
             return run_skill(name[6:], args)
         known = ", ".join(sorted(NATIVE_TOOL_NAMES)) + (", " + ", ".join(f"skill_{s}" for s in SKILLS_REGISTRY) if SKILLS_REGISTRY else "")
@@ -243,29 +280,26 @@ class Agent:
         sub_cfg["stream"] = True
 
         sub_parts = []
-        sub_started = False
 
         def on_sub_text(t):
             nonlocal sub_parts
             sub_parts.append(t)
         def on_sub_tool_start(k, p):
-            pass
+            self.on_tool_start(k, p)
         def on_sub_tool_result(k, r):
-            pass
+            self.on_tool_result(k, r)
         def on_sub_thought(t):
             self.on_thought(f"[{sub_agent_type}] {t}")
         def on_sub_stream_start():
-            nonlocal sub_started
-            sub_started = True
-            self.on_stream_start()
+            pass
         def on_sub_stream_token(tok):
-            self.on_stream_token(tok)
             sub_parts.append(tok)
         def on_sub_stream_end():
-            self.on_stream_end()
+            pass
 
         sub_agent = Agent(
             self.client, sub_cfg, agent_type=sub_agent_type,
+            on_bash_line=self.runner.on_bash_line,
             on_text=on_sub_text,
             on_tool_start=on_sub_tool_start,
             on_tool_result=on_sub_tool_result,
@@ -286,7 +320,7 @@ class Agent:
 
         self.on_tool_start(f"subagent:{sub_agent_type}", {"task": task[:120] + ("…" if len(task) > 120 else "")})
 
-        sub_messages = sub_agent.turn(self.cfg.get("model", "qwen2.5-coder:7b"), sub_messages)
+        sub_messages = sub_agent.turn(self.cfg["model"], sub_messages)
 
         result_parts = []
         for msg in sub_messages:
@@ -340,7 +374,9 @@ class Agent:
                 self.on_text(text)
 
             # Détecte un appel identique répété (signe d'un modèle bloqué/trop petit)
-            signature = json.dumps(sorted(calls), sort_keys=True, default=str)
+            signature = "|".join(sorted(
+                f"{name}:{json.dumps(args, sort_keys=True, default=str)}" for name, args in calls
+            ))
             if signature == last_signature:
                 repeat_count += 1
             else:
@@ -368,11 +404,19 @@ class Agent:
                 messages.append({"role": "assistant", "content": warning})
                 return messages
 
+            tool_errors = []
             for name, args in calls:
                 self.on_tool_start(name, args)
                 result = self.dispatch(name, args)
                 self.on_tool_result(name, result)
                 messages.append({"role": "tool", "content": result, "name": name})
+                if result.startswith("Erreur"):
+                    tool_errors.append(f"[{name}] {result}")
+
+            if tool_errors:
+                hint = "Un ou plusieurs outils ont retourné une erreur :\n" + "\n".join(tool_errors)
+                hint += "\nAnalyse ces erreurs et corrige tes appels. Ne répète pas la même commande en échec."
+                messages.append({"role": "user", "content": hint})
 
             if repeat_count >= 1:
                 messages.append({

@@ -13,6 +13,7 @@ import urllib.error
 from pathlib import Path
 
 from .logger import log
+from . import ui as _ui
 
 DANGEROUS_PATTERNS = (
     "rm -rf /", "rm -rf /*", "mkfs", "dd if=", ":(){:|:&};:", ":(){",
@@ -42,10 +43,12 @@ def _truncate(text: str) -> str:
 class ToolRunner:
     """Garde l'état (cwd) entre les appels, comme un vrai shell persistant."""
 
-    def __init__(self, cfg: dict, confirm_callback=None):
+    def __init__(self, cfg: dict, confirm_callback=None, on_bash_line=None):
         self.cfg = cfg
         self.cwd = os.getcwd()
         self.confirm_callback = confirm_callback or (lambda msg: input(msg).strip().lower() in ("o", "oui", "y", "yes"))
+        # Callback appelé pour chaque ligne de sortie bash en temps réel
+        self.on_bash_line = on_bash_line or (lambda line: None)
 
     # ── bash ────────────────────────────────────────────────────────────────
     def bash(self, command: str) -> str:
@@ -71,25 +74,42 @@ class ToolRunner:
 
         try:
             wrapped = f"{command} && echo '___CWD___' && pwd"
-            r = subprocess.run(
-                wrapped, shell=True, capture_output=True, text=True,
-                timeout=self.cfg.get("bash_timeout", 60), cwd=self.cwd,
-                executable="/bin/bash",
+            proc = subprocess.Popen(
+                wrapped, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=self.cwd, executable="/bin/bash",
             )
-            stdout = r.stdout
-            if "___CWD___" in stdout:
-                parts, new_cwd = stdout.split("___CWD___")[0], stdout.split("___CWD___")[1].strip()
-                output = parts.strip()
-                if os.path.isdir(new_cwd):
+            lines = []
+            timeout = self.cfg.get("bash_timeout", 60)
+            import threading, time
+            timed_out = [False]
+
+            def _kill_after():
+                time.sleep(timeout)
+                if proc.poll() is None:
+                    timed_out[0] = True
+                    proc.kill()
+
+            t = threading.Thread(target=_kill_after, daemon=True)
+            t.start()
+
+            for line in proc.stdout:
+                lines.append(line)
+                self.on_bash_line(line.rstrip("\n"))
+
+            proc.wait()
+
+            if timed_out[0]:
+                return f"Erreur: timeout ({timeout}s)"
+
+            full = "".join(lines)
+            if "___CWD___" in full:
+                before, after = full.split("___CWD___", 1)
+                new_cwd = after.strip().splitlines()[0].strip() if after.strip() else ""
+                if new_cwd and os.path.isdir(new_cwd):
                     self.cwd = new_cwd
-            else:
-                output = stdout.strip()
-            err = r.stderr.strip()
-            out = (output + (("\n" + err) if err else "")).strip()
-            out = out if out else "(aucune sortie)"
+                full = before
+            out = full.strip() or "(aucune sortie)"
             return _truncate(out)
-        except subprocess.TimeoutExpired:
-            return f"Erreur: timeout ({self.cfg.get('bash_timeout', 60)}s)"
         except Exception as e:
             return f"Erreur: {e}"
 
@@ -207,6 +227,10 @@ class ToolRunner:
     # ── git ───────────────────────────────────────────────────────────────
     def git(self, args: str) -> str:
         return self.bash(f"git {args}")
+
+    # ── question utilisateur ──────────────────────────────────────────────
+    def question(self, question: str) -> str:
+        return _ui.show_question(question)
 
     # ── http (lecture seule, pas d'env réseau arbitraire dangereux) ─────────
     def http_get(self, url: str) -> str:
@@ -358,6 +382,18 @@ NATIVE_TOOL_SCHEMAS = [SUBAGENT_TOOL_SCHEMA,
                 "type": "object",
                 "properties": {"args": {"type": "string", "description": "Arguments git, ex: 'status -s' ou 'commit -m \"msg\"'."}},
                 "required": ["args"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "question",
+            "description": "Pose une question à l'utilisateur et attend sa réponse textuelle. Utilise ceci quand tu as besoin d'une clarification, d'un choix, ou de précisions avant d'agir. N'essaie JAMAIS de deviner quand le contexte est ambigu.",
+            "parameters": {
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "Question claire et concise pour l'utilisateur."}},
+                "required": ["question"],
             },
         },
     },

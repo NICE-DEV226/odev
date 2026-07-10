@@ -116,6 +116,7 @@ class SkillLoadingTests(unittest.TestCase):
                 "test_generator",
                 "architecture_mapper",
                 "ci_triage",
+                "generate_docs",
             }:
                 self.assertIn(expected, loaded)
                 self.assertIn(expected, skills_module.SKILLS_REGISTRY)

@@ -1,6 +1,6 @@
-"""Skill odev: revue de code approfondie sur un diff ou fichier."""
+"""Skill odev: revue de code approfondie sur un diff, fichier ou dossier."""
 
-import subprocess
+import re
 from pathlib import Path
 
 
@@ -10,74 +10,134 @@ def get_description():
 
 def get_schema():
     return {
-        "path": {"type": "string", "default": "."},
+        "path": {"type": "string", "default": ".", "description": "Chemin du fichier ou dossier à analyser."},
         "diff": {"type": "string", "description": "Diff unifié à analyser, si déjà disponible."},
         "focus": {"type": "string", "default": "correctness"},
     }
 
 
-def _load_diff(path: Path) -> str:
-    root = path if path.is_dir() else path.parent
+PATTERNS = [
+    (r"except\s+(Exception|\w+Error)\s*:", "high", "Capture d'exception trop large"),
+    (r"except\s*:", "high", "Bare except — attrape tout"),
+    (r"\btodo\b", "medium", "TODO à traiter"),
+    (r"\bfixme\b", "high", "FIXME à traiter avant merge"),
+    (r"^\s*pass\s*$", "high", "Bloc placeholder (pass)"),
+    (r"print\s*\(", "low", "Trace de debug (print)"),
+    (r"return\s+(True|False)\s*$", "medium", "Booléen en dur — vérifier les cas limites"),
+    (r"\.get\(\s*['\"][^'\"]+['\"]\s*\)\s*$", "medium", "Appel .get() sans valeur par défaut"),
+    (r"#\s*type:\s*ignore", "medium", "Commentaire type:ignore — vérifier si nécessaire"),
+    (r"\bassert\s+False\b", "high", "assert False dans le code (debug ou inachevé)"),
+]
+
+
+def _score_line(line: str):
+    for pattern, severity, message in PATTERNS:
+        if re.search(pattern, line, re.IGNORECASE):
+            return (severity, message)
+    return None
+
+
+
+def _should_skip(rel: Path) -> bool:
+    skip_dirs = {".venv", "venv", "node_modules", "__pycache__", ".git", ".eggs", "dist", "build"}
+    return any(p in skip_dirs for p in rel.parts)
+
+
+def _scan_file(filepath: Path) -> list:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "diff", "--no-ext-diff", "--unified=3"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        return result.stdout.strip()
+        text = filepath.read_text(encoding="utf-8", errors="replace")
     except Exception:
-        return ""
+        return [f"- ⚠ Impossible de lire {filepath.name}"]
+    findings = []
+    for i, line in enumerate(text.splitlines(), 1):
+        finding = _score_line(line)
+        if finding:
+            severity, message = finding
+            findings.append(f"- [{severity}] Ligne {i} : {message} : {line.strip()[:100]}")
+    return findings
 
 
 def run(ctx, args=None):
     args = args or {}
     path = Path(args.get("path", ".")).expanduser()
-    diff = (args.get("diff") or "").strip() or _load_diff(path)
+    diff_arg = (args.get("diff") or "").strip()
     focus = (args.get("focus") or "correctness").strip()
 
-    if not diff and path.exists() and path.is_file():
-        diff = path.read_text(encoding="utf-8", errors="replace")
+    if diff_arg:
+        findings = []
+        for raw_line in diff_arg.splitlines():
+            if not raw_line.startswith(("+", "-", " ")):
+                continue
+            finding = _score_line(raw_line)
+            if finding:
+                severity, message = finding
+                findings.append(f"- [{severity}] {message} : {raw_line[:140]}")
+        unique = []
+        for item in findings:
+            if item not in unique:
+                unique.append(item)
+        return "\n".join([
+            f"Contexte: {path}",
+            f"Focus: {focus}",
+            "",
+            "Axes de revue:",
+            "- Correctness et cas limites",
+            "- Risques de régression",
+            "- Couverture de tests",
+            "- Lisibilité et dette technique",
+            "",
+            "Constats (diff):",
+            *(unique[:15] if unique else ["- Aucun signal détecté dans le diff."]),
+            "",
+            "Suite recommandée:",
+            "- Vérifier les chemins d'erreur.",
+            "- Ajouter ou ajuster les tests liés.",
+            "- Relire les interfaces publiques modifiées.",
+        ])
 
-    if not diff:
-        return "Aucun diff ni fichier exploitable trouvé."
+    if path.exists() and path.is_file():
+        if path.suffix == ".py":
+            findings = _scan_file(path)
+            lines = [
+                f"Fichier: {path}",
+                f"Focus: {focus}",
+                "",
+                "Axes de revue:",
+                "- Correctness et cas limites",
+                "- Risques de régression",
+                "- Couverture de tests",
+                "- Lisibilité et dette technique",
+                "",
+            ]
+            if findings:
+                lines.append("Constats:")
+                lines.extend(findings[:20])
+            else:
+                lines.append("Aucun signal problématique détecté.")
+            return "\n".join(lines)
+        return f"Extension non supportée: {path.suffix}"
 
-    findings = []
-    for raw_line in diff.splitlines():
-        if not raw_line.startswith(("+", "-", " ")):
-            continue
-        line = raw_line.lower()
-        if "except exception" in line or "bare except" in line:
-            findings.append("- [high] Capture d'exception trop large.")
-        elif "todo" in line or "fixme" in line:
-            findings.append("- [medium] TODO/FIXME à traiter avant merge.")
-        elif "pass" == line.strip():
-            findings.append("- [high] Bloc placeholder laissé en place.")
-        elif "print(" in line and "logger" not in line:
-            findings.append("- [low] Trace de debug potentiellement à retirer.")
-        elif "return true" in line or "return false" in line:
-            findings.append("- [medium] Vérifier les cas limites autour du booléen.")
+    if path.exists() and path.is_dir():
+        py_files = sorted(p for p in path.rglob("*.py") if not _should_skip(p.relative_to(path)))
+        if not py_files:
+            return "Aucun fichier Python trouvé dans ce dossier."
+        lines = [
+            f"Dossier analysé: {path}",
+            f"Fichiers Python: {len(py_files)}",
+            f"Focus: {focus}",
+            "",
+        ]
+        total = 0
+        for py in py_files:
+            rel = py.relative_to(path)
+            findings = _scan_file(py)
+            if findings:
+                total += len(findings)
+                lines.append(f"--- {rel} ---")
+                lines.extend(findings)
+                lines.append("")
+        if total == 0:
+            lines.append("Aucun signal problématique détecté dans les fichiers analysés.")
+        return "\n".join(lines)
 
-    unique_findings = []
-    for item in findings:
-        if item not in unique_findings:
-            unique_findings.append(item)
-
-    return "\n".join([
-        f"Contexte: {path}",
-        f"Focus: {focus}",
-        "",
-        "Axes de revue:",
-        "- Correctness et cas limites",
-        "- Risques de régression",
-        "- Couverture de tests",
-        "- Lisibilité et dette technique",
-        "",
-        "Constats:",
-        *(unique_findings[:12] if unique_findings else ["- Aucun signal fort détecté automatiquement."]),
-        "",
-        "Suite recommandée:",
-        "- Vérifier les chemins d'erreur.",
-        "- Ajouter ou ajuster les tests liés.",
-        "- Relire les interfaces publiques modifiées.",
-    ])
+    return f"Le chemin {path} n'existe pas."

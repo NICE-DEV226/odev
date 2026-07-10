@@ -23,6 +23,8 @@ from .memory import (
     add_task,
     complete_task,
     add_note,
+    init_project,
+    is_project_mode,
     render_memory,
     build_memory_block,
 )
@@ -33,43 +35,15 @@ from .agents import AGENT_TYPES, get_system_prompt
 from .agent import Agent
 from . import ui
 
-SYSTEM_PROMPT_BASE = """Tu es odev, un assistant système et de code de haut niveau opérant directement dans le terminal.
-Tu es direct, pragmatique et extrêmement efficace. Tu réponds en français sauf si on te demande explicitement une autre langue.
-
-Tu disposes des outils suivants :
-- bash(command) : exécute n'importe quelle commande shell.
-- read_file / write_file / edit_file / apply_patch / list_dir : manipulation fine de fichiers (préfère apply_patch pour les changements multi-lignes, edit_file pour une substitution ciblée).
-- run_python(code) : exécute du Python isolé pour des calculs ou scripts ponctuels.
-- git(args) : sous-commandes git dans le dossier courant.
-- http_get(url) : récupère le contenu brut d'une page (lecture seule).
-- subagent(agent_type, task, context) : délègue une tâche à un sous-agent spécialisé (coder, reviewer, explorer, planner). Utilise-le pour diviser une tâche complexe ou pour changer de perspective.
-- skill_<nom> : capacités spécialisées chargées dynamiquement, vois /skills.
-
-Règles critiques :
-1. Utilise les outils dédiés (read_file, write_file, edit_file) plutôt que bash quand c'est plus précis et plus sûr.
-2. Pour une édition ciblée dans un fichier existant, utilise edit_file plutôt que de tout réécrire.
-3. Avant une action destructrice ou irréversible, explique brièvement ce que tu vas faire.
-4. Reste concis dans tes explications. Pas de longs discours après l'exécution d'un outil.
-5. Si une commande échoue, analyse l'erreur et corrige plutôt que de répéter la même commande.
-6. Pour les tâches complexes, utilise subagent pour déléguer l'exploration, la revue ou la planification à des experts.
-"""
-
-
 CURRENT_AGENT_TYPE = "auto"
 
 
 def build_system_prompt(memory: dict, agent_type: str = None) -> str:
-    base = SYSTEM_PROMPT_BASE
-    if agent_type and agent_type != "auto":
-        base = get_system_prompt(agent_type, base)
+    base = get_system_prompt(agent_type or "auto")
     memory_block = build_memory_block(memory)
     if not memory_block:
         return base
     return base + "\n\n" + memory_block
-    memory_block = build_memory_block(memory)
-    if not memory_block:
-        return SYSTEM_PROMPT_BASE
-    return SYSTEM_PROMPT_BASE + "\n\n" + memory_block
 
 SHELL_BUILTINS = {
     "ls", "ll", "la", "pwd", "cat", "less", "head", "tail", "grep", "find",
@@ -122,6 +96,7 @@ def make_agent(client, cfg, agent_type: str = "auto") -> Agent:
     return Agent(
         client, cfg, agent_type=agent_type,
         confirm_callback=confirm_callback,
+        on_bash_line=ui.bash_line,
         on_text=ui.show_text,
         on_tool_start=ui.show_tool_start,
         on_tool_result=ui.show_tool_result,
@@ -211,9 +186,15 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
             else:
                 ui.console.print(f"[warn]Agent inconnu. Disponibles : {', '.join(AGENT_TYPES)}[/warn]")
 
+    elif action == "/init":
+        path = init_project()
+        ui.console.print(f"[success]✓ Projet initialisé : {path}[/success]")
+
     elif action == "/memory":
+        mode = "📁 projet" if is_project_mode() else "🌐 global"
         block = render_memory(memory)
-        ui.console.print(block or "[dim]Aucune mémoire persistante.[/dim]")
+        msg = f"{mode}\n{block}" if block else f"{mode} — [dim]Aucune mémoire persistante.[/dim]"
+        ui.console.print(msg)
 
     elif action == "/summary":
         if len(parts) == 1:
@@ -370,7 +351,7 @@ def main():
 
     while True:
         try:
-            inp = ui.show_user_prompt(os.getcwd()).strip()
+            inp = ui.show_user_prompt(os.getcwd(), memory, agent_type).strip()
         except (EOFError, KeyboardInterrupt):
             ui.console.print("\n[dim]À bientôt.[/dim]")
             if cfg.get("auto_save_session"):

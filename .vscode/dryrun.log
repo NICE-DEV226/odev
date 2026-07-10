@@ -1,0 +1,10 @@
+make --dry-run --always-make --keep-going --print-directory
+make: Entering directory '/home/eliezer/devs/odev_project'
+printf "Targets:\n"
+printf "  run    Start the CLI with Python\n"
+printf "  dev    Alias for run\n"
+printf "  test   Run the unit test suite\n"
+printf "  check  Compile sources with py_compile\n"
+printf "  clean  Remove bytecode caches\n"
+make: Leaving directory '/home/eliezer/devs/odev_project'
+ 

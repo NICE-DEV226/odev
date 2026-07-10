@@ -2,10 +2,12 @@
 odev.ui — Rendu terminal via Rich : markdown colorisé, thèmes complets, panneaux d'outils.
 """
 
+import sys
 from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -13,8 +15,12 @@ from rich.syntax import Syntax
 from rich.theme import Theme
 from rich.markup import escape
 from rich import box
+from rich.text import Text
+from rich.rule import Rule
 
-MAX_PREVIEW_LINES = 30
+from .completion import setup as setup_completion
+
+MAX_PREVIEW_LINES = 60
 
 STYLE_PRESETS = {
     "codex": {
@@ -115,7 +121,7 @@ console = Console(theme=Theme({
     "error": _preset["error"],
     "success": _preset["success"],
     "dim": _preset["dim"],
-}), highlight=False)
+}), highlight=False, emoji=False)
 
 
 def available_styles() -> list:
@@ -142,7 +148,7 @@ def set_style(style: str) -> str:
         "error": _preset["error"],
         "success": _preset["success"],
         "dim": _preset["dim"],
-    }), highlight=False)
+    }), highlight=False, emoji=False)
     return _current_style
 
 
@@ -151,6 +157,10 @@ def _preview(text: str, limit: int = 120) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+def _render_md(text: str) -> Markdown:
+    return Markdown(text, code_theme=_preset.get("code_theme", "monokai"))
 
 
 def banner(model: str, skills: list, cwd: str, version: str = "2.0", memory: Optional[dict] = None, agent_type: str = "auto"):
@@ -183,20 +193,57 @@ def banner(model: str, skills: list, cwd: str, version: str = "2.0", memory: Opt
     console.print()
 
 
-def show_user_prompt(cwd: str) -> str:
-    console.print(f"[dim]{cwd}[/dim] ", end="")
-    return console.input(f"[user]{_preset['icon']}[/user]  ")
+def show_question(question: str) -> str:
+    console.print()
+    console.print(Panel(
+        f"[warn]❓ {question}[/warn]",
+        title="[warn]question[/warn]",
+        border_style=_preset["warn"],
+        padding=(0, 1),
+    ))
+    answer = console.input(f"[user]{_preset['icon']}[/user]  ").strip()
+    return answer
+
+
+def show_user_prompt(cwd: str, memory: dict = None, agent_type: str = "auto") -> str:
+    from .memory import is_project_mode as _is_proj
+    setup_completion(cwd, memory)
+    mode = " 📁" if _is_proj(cwd) else ""
+    label = f"[dim]{Path(cwd).name}{mode}[/dim]"
+    if agent_type != "auto":
+        label += f" [tool]‹{agent_type}›[/tool]"
+    console.print()
+    console.print(f"{label}")
+    prompt = f"[user]{_preset['icon']}[/user]  "
+    console.print(prompt, end="")
+    try:
+        return input()
+    except (EOFError, KeyboardInterrupt):
+        raise
 
 
 def show_thought(thought: str):
-    preview = thought[:500] + ("…" if len(thought) > 500 else "")
+    lines = thought.splitlines()
+    display = "\n".join(lines[:MAX_PREVIEW_LINES * 2])
+    if len(lines) > MAX_PREVIEW_LINES * 2:
+        display += f"\n[dim]… ({len(lines) - MAX_PREVIEW_LINES * 2} lines more)[/dim]"
+    try:
+        rendered = _render_md(display)
+    except Exception:
+        rendered = Text(display)
     console.print(Panel(
-        f"[dim]{escape(preview)}[/dim]",
+        rendered,
         title=f"[dim]{_preset['icon']} réflexion[/dim]",
         border_style=_preset["thought_border"],
         padding=(0, 1),
-        width=min(console.width, 100),
+        width=min(console.width, 120),
     ))
+
+
+# ── Streaming live (Markdown temps réel) ──────────────────────────────────
+
+_live: Optional[Live] = None
+_stream_buffer: list[str] = []
 
 
 def show_text(text: str):
@@ -205,24 +252,52 @@ def show_text(text: str):
     console.print()
     console.print(f"[agent]{_preset['icon']} odev[/agent]")
     try:
-        md = Markdown(text, code_theme=_preset.get("code_theme", "monokai"))
+        md = _render_md(text)
         console.print(md)
     except Exception:
         console.print(text)
 
 
 def start_stream():
+    global _stream_buffer, _live
+    _stream_buffer = []
     console.print()
-    console.print(f"[agent]{_preset['icon']} odev[/agent] ", end="")
+    live_md = _render_md("")
+    _live = Live(live_md, console=console, refresh_per_second=12, transient=False, vertical_overflow="visible")
+    try:
+        _live.start()
+    except Exception:
+        _live = None
 
 
 def stream_token(token: str):
-    console.print(token, end="")
+    global _stream_buffer
+    _stream_buffer.append(token)
+    if _live:
+        text = "".join(_stream_buffer)
+        try:
+            md = _render_md(text)
+            _live.update(md)
+        except Exception:
+            pass
 
 
 def end_stream():
-    console.print()
+    global _stream_buffer, _live
+    text = "".join(_stream_buffer)
+    _stream_buffer = []
+    if _live:
+        try:
+            if text.strip():
+                md = _render_md(text)
+                _live.update(md)
+            _live.stop()
+        except Exception:
+            pass
+        _live = None
 
+
+# ── Outils ─────────────────────────────────────────────────────────────────
 
 _TOOL_ICONS = {
     "bash": "$",
@@ -234,10 +309,26 @@ _TOOL_ICONS = {
     "run_python": "🐍",
     "git": "⎇",
     "http_get": "🌐",
+    "question": "❓",
 }
 
 
+_bash_streaming = False
+
+
+def bash_line(line: str):
+    """Appelé pour chaque ligne de sortie bash en temps réel."""
+    global _bash_streaming
+    if not _bash_streaming:
+        return
+    # Masque la ligne de marqueur interne CWD
+    if "___CWD___" in line:
+        return
+    console.print(f"  [dim]{escape(line)}[/dim]")
+
+
 def show_tool_start(name: str, args: dict):
+    global _bash_streaming
     if name.startswith("subagent:"):
         agent_type = name[9:]
         task = args.get("task", "")
@@ -245,7 +336,9 @@ def show_tool_start(name: str, args: dict):
         return
     icon = _TOOL_ICONS.get(name, "⚙")
     detail = ""
-    if "command" in args:
+    if "question" in args:
+        detail = args["question"]
+    elif "command" in args:
         detail = args["command"]
     elif "path" in args:
         detail = args["path"]
@@ -255,13 +348,19 @@ def show_tool_start(name: str, args: dict):
         detail = args["url"]
     elif name.startswith("skill_"):
         detail = str(args)
+    label = f"  [tool]{icon} {name}[/tool]"
     if detail:
-        console.print(f"\n  [tool]{icon} {name}[/tool] [dim]{detail}[/dim]")
-    else:
-        console.print(f"\n  [tool]{icon} {name}[/tool]")
+        label += f" [dim]{_preview(detail, 150)}[/dim]"
+    console.print()
+    console.print(label)
+    # Active le streaming ligne par ligne pour bash
+    _bash_streaming = name == "bash"
 
 
 def show_tool_result(name: str, result: str, full: bool = False):
+    global _bash_streaming
+    _bash_streaming = False  # toujours désactiver à la fin
+
     if name.startswith("subagent:"):
         agent_type = name[9:]
         lines = result.split("\n")
@@ -275,29 +374,28 @@ def show_tool_result(name: str, result: str, full: bool = False):
             padding=(0, 1),
         ))
         return
-    if full or name == "read_file":
+
+    # bash : déjà affiché ligne par ligne — juste afficher le résumé si tronqué
+    if name == "bash":
         lines = result.split("\n")
-        preview = "\n".join(lines[:MAX_PREVIEW_LINES * 2])
-        if len(lines) > MAX_PREVIEW_LINES * 2:
-            preview += f"\n[dim]… ({len(lines) - MAX_PREVIEW_LINES * 2} lines more)[/dim]"
-        console.print(Panel(
-            preview,
-            title=f"[tool]{name}[/tool]",
-            border_style=_preset["tool_border"],
-            padding=(0, 1),
-        ))
+        if len(lines) > MAX_PREVIEW_LINES * 4:
+            console.print(f"  [dim]… ({len(lines) - MAX_PREVIEW_LINES * 4} lignes supplémentaires tronquées)[/dim]")
         return
+
+    limit = MAX_PREVIEW_LINES * 4 if name in ("read_file", "run_python") else MAX_PREVIEW_LINES
     lines = result.split("\n")
-    preview = "\n".join(lines[:MAX_PREVIEW_LINES])
-    if len(lines) > MAX_PREVIEW_LINES:
-        preview += f"\n[dim]… ({len(lines) - MAX_PREVIEW_LINES} lines more)[/dim]"
+    preview = "\n".join(lines[:limit])
+    if len(lines) > limit:
+        preview += f"\n[dim]… ({len(lines) - limit} lines more)[/dim]"
     console.print(Panel(
-        preview,
+        escape(preview),
         title=f"[tool]{name}[/tool]",
         border_style=_preset["tool_border"],
         padding=(0, 1),
     ))
 
+
+# ── Tables ─────────────────────────────────────────────────────────────────
 
 def show_skills_table(registry: dict):
     if not registry:

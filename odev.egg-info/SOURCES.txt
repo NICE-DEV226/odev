@@ -3,6 +3,7 @@ pyproject.toml
 odev/__init__.py
 odev/agent.py
 odev/cli.py
+odev/completion.py
 odev/config.py
 odev/logger.py
 odev/memory.py
