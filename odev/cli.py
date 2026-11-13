@@ -35,6 +35,7 @@ from .agents import AGENT_TYPES, get_system_prompt
 from .agent import Agent
 from . import ui
 from . import repomap
+from . import providers
 
 CURRENT_AGENT_TYPE = "auto"
 
@@ -326,7 +327,7 @@ def main():
     if args.host:
         cfg["ollama_host"] = args.host
 
-    client = ollama.Client(host=cfg["ollama_host"])
+    client = providers.get_client(cfg)
     model = check_model(client, cfg["model"])
     if cfg.get("num_ctx", 16384) < 32768:
         ui.console.print(

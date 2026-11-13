@@ -27,6 +27,7 @@ CI: `pip install -e .` → `make test` → `make check`.
 `odev/sessions.py` — persist/load sessions as JSON in `sessions/`.  
 `odev/memory.py` — persistent summary/tasks/notes in `memory.json`.  
 `odev/repomap.py` — AST-based repo map (Python symbols, ~800 tokens) injected into the system prompt when `repo_map: true` and ≥5 `.py` files exist.  
+`odev/providers.py` — LLM backends: `ollama` (default), `openai` (any OpenAI-compatible API: OpenRouter, Groq, DeepSeek…), `anthropic`. Responses normalized to ollama-like objects; API key read from env var named by `api_key_env` (default `ODEV_API_KEY`).
 `odev/skills.py` — dynamic skill loader (bundled `odev/skills/` + user `~/.config/odev/skills/`).  
 `odev/ui.py` — Rich TUI: 5 themes (`codex`, `claude`, `gemini`, `nord`, `catppuccin`), syntax highlighting, thinking/subagent panels.  
 `odev/logger.py` — rotating file logger → `odev.log`.
@@ -71,6 +72,7 @@ Each sub-agent runs in isolation with its own specialized system prompt, then re
 - `trim_history` also compresses old tool results (>1500 chars → 400-char head + note), keeping the last 10 messages untouched; persisted history is never mutated (copies are made).
 - Raw shell commands typed at the CLI prompt (matched against `SHELL_BUILTINS` in `cli.py:61`) **skip the agent entirely** and run directly via ToolRunner.
 - `run_python` uses `python3 -I -S` (isolated, no site packages).
+- For `openai`/`anthropic` providers, `num_ctx`/`keep_alive` are ignored (no equivalent); Anthropic `max_tokens` defaults to 8192. Tool-call ids are synthesized (`call_{i}_{j}` / `toolu_{i}_{j}`) since odev history doesn't store provider ids.
 - `apply_patch` auto-detects strip level (1 if patch starts with `--- a/`, else 0).
 - History trimmed to 60 messages (`max_history_messages`) + tool-result compression. 3 identical tool calls in a row → loop guard triggered.
 - Fallback parser extracts tool calls from ```bash and ```json fences (for small models without native tool-calling).
@@ -86,7 +88,7 @@ Bundled: `odev/skills/` (no `__init__.py` — flat file collection).
 
 ## Configuration (`/set` or `~/.config/odev/config.json`)
 
-`model`, `ollama_host` (also `OLLAMA_HOST` env), `num_ctx` (16384), `temperature` (0.1), `max_loops` (24), `max_subagent_depth` (2), `bash_timeout` (60), `confirm_dangerous`, `auto_save_session`, `repo_map` (true), `compact` (`trim`|`smart` — smart résume l'historique via le modèle au lieu de tronquer), `ui_style` (codex/claude/gemini/nord/catppuccin).
+`model`, `provider` (ollama/openai/anthropic), `api_base` (empty = provider default), `api_key_env` (`ODEV_API_KEY`), `ollama_host` (also `OLLAMA_HOST` env), `num_ctx` (16384), `temperature` (0.1), `max_loops` (24), `max_subagent_depth` (2), `bash_timeout` (60), `confirm_dangerous`, `auto_save_session`, `repo_map` (true), `compact` (`trim`|`smart` — smart résume l'historique via le modèle au lieu de tronquer), `ui_style` (codex/claude/gemini/nord/catppuccin).
 
 <!-- memexa:start -->
 ## Memexa memory

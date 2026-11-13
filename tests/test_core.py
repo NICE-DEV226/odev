@@ -351,6 +351,47 @@ class TodoToolTests(unittest.TestCase):
             self.assertIn("vidée", runner.todo([]))
 
 
+class ProviderConversionTests(unittest.TestCase):
+    def _messages(self):
+        return [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "fais X"},
+            {"role": "assistant", "content": "j'appelle", "tool_calls": [
+                {"function": {"name": "bash", "arguments": {"command": "ls"}}},
+            ]},
+            {"role": "tool", "content": "fichier.txt", "name": "bash"},
+            {"role": "assistant", "content": "terminé"},
+        ]
+
+    def test_openai_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            providers_module = import_with_temp_home("odev.providers", Path(tmp) / "home")
+            out = providers_module._to_openai_messages(self._messages())
+            self.assertEqual(out[0]["role"], "system")
+            assistant = out[2]
+            self.assertEqual(assistant["role"], "assistant")
+            self.assertEqual(len(assistant["tool_calls"]), 1)
+            self.assertEqual(assistant["tool_calls"][0]["function"]["name"], "bash")
+            self.assertIn('"command"', assistant["tool_calls"][0]["function"]["arguments"])
+            tool = out[3]
+            self.assertEqual(tool["role"], "tool")
+            self.assertEqual(tool["tool_call_id"], assistant["tool_calls"][0]["id"])
+
+    def test_anthropic_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            providers_module = import_with_temp_home("odev.providers", Path(tmp) / "home")
+            system, out = providers_module._to_anthropic_messages(self._messages())
+            self.assertEqual(system, "sys")
+            assistant = out[1]
+            self.assertEqual(assistant["role"], "assistant")
+            tool_use = [b for b in assistant["content"] if b["type"] == "tool_use"][0]
+            tool_result_msg = out[2]
+            self.assertEqual(tool_result_msg["role"], "user")
+            result = tool_result_msg["content"][0]
+            self.assertEqual(result["type"], "tool_result")
+            self.assertEqual(result["tool_use_id"], tool_use["id"])
+
+
 class SessionNameTests(unittest.TestCase):
     def test_session_name_sanitized(self):
         with tempfile.TemporaryDirectory() as tmp:

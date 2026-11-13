@@ -20,6 +20,9 @@ for d in (ODEV_DIR, SKILLS_DIR, SESSIONS_DIR):
 
 DEFAULTS = {
     "model": "qwen2.5-coder:7b",
+    "provider": "ollama",          # ollama | openai | anthropic
+    "api_base": "",                # base URL pour openai/anthropic (vide = défaut)
+    "api_key_env": "ODEV_API_KEY", # nom de la variable d'env contenant la clé
     "ollama_host": os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
     "keep_alive": "10m",
     "max_loops": 24,

@@ -202,7 +202,7 @@ class Agent:
             )
         except Exception as e:
             log.error(f"appel modèle échoué: {e}")
-            return f"[Erreur Ollama] {e}", [], False
+            return f"[Erreur modèle] {e}", [], False
 
         if use_stream:
             raw_text_parts = []
