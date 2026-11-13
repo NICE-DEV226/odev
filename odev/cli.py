@@ -378,6 +378,7 @@ def main():
             agent.cfg = cfg
             agent.runner.cfg = cfg
             agent.agent_type = agent_type
+            agent.runner.cwd = os.getcwd()  # resync après /cd ou autre changement de cwd
             continue
 
         if is_shell_command(inp):

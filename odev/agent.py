@@ -322,11 +322,8 @@ class Agent:
         sub_cfg["max_loops"] = min(sub_cfg.get("max_loops", 24), 12)
         sub_cfg["stream"] = True
 
-        sub_parts = []
-
         def on_sub_text(t):
-            nonlocal sub_parts
-            sub_parts.append(t)
+            pass
         def on_sub_tool_start(k, p):
             self.on_tool_start(k, p)
         def on_sub_tool_result(k, r):
@@ -336,7 +333,7 @@ class Agent:
         def on_sub_stream_start():
             pass
         def on_sub_stream_token(tok):
-            sub_parts.append(tok)
+            pass
         def on_sub_stream_end():
             pass
 

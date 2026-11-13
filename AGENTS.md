@@ -62,6 +62,8 @@ Each sub-agent runs in isolation with its own specialized system prompt, then re
 ## Non-obvious behavior
 
 - `cd` in bash tool is **intercepted** by ToolRunner (not run via subprocess). `cd` into a non-existent dir returns an error string, does not throw.
+- `/cd` resyncs `agent.runner.cwd` after every slash command (`cli.py`) — the ToolRunner cwd is independent of `os.getcwd()`.
+- Known limitation: `explorer`/`planner` tool restrictions remove write tools but they keep `bash`/`git`/`run_python`, so a sub-agent can still modify files via shell. `AGENT_TYPES[*].readonly` is metadata only (`is_readonly` is unused).
 - `bash`/`run_python` results always end with `[exit code: N]` — the model can tell success from failure.
 - `write_file`/`edit_file`/`apply_patch` on `.py` files auto-run a `compile()` syntax check and append the result (no `__pycache__` created).
 - `edit_file` `count=0` replaces **only the first occurrence** (count>0 still requires an exact occurrence match).
