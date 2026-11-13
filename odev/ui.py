@@ -2,6 +2,8 @@
 odev.ui — Rendu terminal via Rich : markdown colorisé, thèmes complets, panneaux d'outils.
 """
 
+import difflib
+import re
 import sys
 import time
 from pathlib import Path
@@ -350,10 +352,65 @@ _TOOL_ICONS = {
     "http_get": "🌐",
     "question": "❓",
     "todo": "☑",
+    "subagent": "🔄",
 }
 
 
 _bash_streaming = False
+_last_tool_args: dict = {}
+
+# Extension → lexer Pygments pour coloriser les aperçus de fichiers
+_LEXERS = {
+    ".py": "python", ".js": "javascript", ".jsx": "javascript", ".ts": "typescript",
+    ".tsx": "typescript", ".json": "json", ".md": "markdown", ".sh": "bash",
+    ".bash": "bash", ".zsh": "bash", ".html": "html", ".css": "css", ".scss": "scss",
+    ".rs": "rust", ".go": "go", ".java": "java", ".c": "c", ".cpp": "cpp",
+    ".h": "c", ".hpp": "cpp", ".rb": "ruby", ".php": "php", ".sql": "sql",
+    ".yaml": "yaml", ".yml": "yaml", ".toml": "toml", ".xml": "xml",
+    ".vue": "html", ".svelte": "html", ".lua": "lua", ".kt": "kotlin",
+    ".swift": "swift", ".ex": "elixir", ".exs": "elixir", ".hs": "haskell",
+    ".scala": "scala", ".tf": "hcl",
+}
+
+
+def _lexer_for(path: str) -> Optional[str]:
+    name = Path(path).name.lower()
+    if name in ("dockerfile", "makefile", "gemfile", "rakefile"):
+        return {"dockerfile": "docker", "makefile": "make", "gemfile": "ruby", "rakefile": "ruby"}[name]
+    return _LEXERS.get(Path(path).suffix.lower())
+
+
+def _code_block(text: str, path: str = ""):
+    """Retourne un Syntax coloré si le langage est connu, sinon du texte brut."""
+    lexer = _lexer_for(path)
+    if lexer:
+        try:
+            return Syntax(text, lexer, theme=_preset.get("code_theme", "monokai"),
+                          line_numbers=False, word_wrap=True)
+        except Exception:
+            pass
+    return Text(text)
+
+
+_EXIT_RE = re.compile(r"\[exit code: (\d+)\]\s*$")
+
+_STATUS_ICONS = {"ok": "✓", "error": "✗", "info": "•"}
+_STATUS_STYLES = {"ok": "success", "error": "error", "info": "tool"}
+
+
+def _tool_status(name: str, result: str) -> str:
+    """'ok' | 'error' | 'info' — déduit du résultat pour colorer le panneau."""
+    if name.startswith("subagent:"):
+        return "info"
+    head = result.lstrip()[:200]
+    if head.startswith(("Erreur", "✗")) or "⨯" in head:
+        return "error"
+    m = _EXIT_RE.search(result)
+    if m and int(m.group(1)) != 0:
+        return "error"
+    if head.startswith(("✓", "(inchangé")):
+        return "ok"
+    return "info"
 
 
 def bash_line(line: str):
@@ -368,7 +425,8 @@ def bash_line(line: str):
 
 
 def show_tool_start(name: str, args: dict):
-    global _bash_streaming
+    global _bash_streaming, _last_tool_args
+    _last_tool_args = args or {}
     if name.startswith("subagent:"):
         agent_type = name[9:]
         task = args.get("task", "")
@@ -400,6 +458,11 @@ def show_tool_start(name: str, args: dict):
 def show_tool_result(name: str, result: str, full: bool = False):
     global _bash_streaming
     _bash_streaming = False  # toujours désactiver à la fin
+    args = _last_tool_args
+    status = _tool_status(name, result)
+    status_tag = f"[{_STATUS_STYLES[status]}]{_STATUS_ICONS[status]}[/] "
+    border = _preset["error"] if status == "error" else (
+        _preset["success"] if status == "ok" else _preset["tool_border"])
 
     if name.startswith("subagent:"):
         agent_type = name[9:]
@@ -420,19 +483,94 @@ def show_tool_result(name: str, result: str, full: bool = False):
         lines = result.split("\n")
         if len(lines) > MAX_PREVIEW_LINES * 4:
             console.print(f"  [dim]… ({len(lines) - MAX_PREVIEW_LINES * 4} lignes supplémentaires tronquées)[/dim]")
+        # Une ligne de statut si la commande a échoué
+        m = _EXIT_RE.search(result)
+        if (m and int(m.group(1)) != 0) or result.lstrip().startswith("Erreur"):
+            console.print(f"  [error]✗ bash a échoué[/error]")
         return
 
-    limit = MAX_PREVIEW_LINES * 4 if name in ("read_file", "run_python") else MAX_PREVIEW_LINES
+    # edit_file : montrer le diff old → new plutôt que le texte brut
+    if name == "edit_file" and status == "ok" and args.get("old") is not None:
+        old_text = str(args.get("old", ""))
+        new_text = str(args.get("new", ""))
+        diff = list(difflib.unified_diff(
+            old_text.splitlines(), new_text.splitlines(),
+            fromfile="avant", tofile="après", lineterm="",
+        ))
+        limit = MAX_PREVIEW_LINES * 3
+        body_lines = []
+        for line in diff[:limit]:
+            if line.startswith("+") and not line.startswith("+++"):
+                body_lines.append(f"[success]{escape(line)}[/success]")
+            elif line.startswith("-") and not line.startswith("---"):
+                body_lines.append(f"[error]{escape(line)}[/error]")
+            else:
+                body_lines.append(f"[dim]{escape(line)}[/dim]")
+        if len(diff) > limit:
+            body_lines.append(f"[dim]… ({len(diff) - limit} lignes de diff omises)[/dim]")
+        console.print(Panel(
+            "\n".join(body_lines) if body_lines else "[dim](diff vide)[/dim]",
+            title=f"[tool]✎ edit_file[/tool] [dim]{_preview(args.get('path', ''), 60)}[/dim]",
+            border_style=border,
+            padding=(0, 1),
+        ))
+        _print_result_notes(result)
+        return
+
+    # write_file : aperçu du contenu écrit, coloré selon l'extension
+    if name == "write_file" and status == "ok" and args.get("content"):
+        content = str(args["content"])
+        all_lines = content.split("\n")
+        omitted = max(0, len(all_lines) - MAX_PREVIEW_LINES)
+        preview = "\n".join(all_lines[:MAX_PREVIEW_LINES])
+        console.print(Panel(
+            _code_block(preview, args.get("path", "")),
+            title=f"[tool]✎ write_file[/tool] [dim]{_preview(args.get('path', ''), 60)}[/dim]",
+            border_style=border,
+            padding=(0, 1),
+        ))
+        if omitted:
+            console.print(f"  [dim]… ({omitted} lignes omises)[/dim]")
+        _print_result_notes(result)
+        return
+
+    # read_file : colorer le contenu selon l'extension du fichier
+    if name == "read_file" and args.get("path"):
+        limit = MAX_PREVIEW_LINES * 4
+        lines = result.split("\n")
+        omitted = max(0, len(lines) - limit)
+        # Retire le marqueur de troncature _truncate avant coloration
+        body = "\n".join(lines[:limit])
+        body = body.split("\n… [tronqué")[0]
+        console.print(Panel(
+            _code_block(body, args.get("path", "")),
+            title=f"[tool]👁 read_file[/tool] [dim]{_preview(args.get('path', ''), 60)}[/dim]",
+            border_style=border,
+            padding=(0, 1),
+        ))
+        if omitted:
+            console.print(f"  [dim]… ({omitted} lignes supplémentaires non affichées)[/dim]")
+        return
+
+    limit = MAX_PREVIEW_LINES * 4 if name in ("run_python",) else MAX_PREVIEW_LINES
     lines = result.split("\n")
     preview = "\n".join(lines[:limit])
     if len(lines) > limit:
         preview += f"\n[dim]… ({len(lines) - limit} lines more)[/dim]"
     console.print(Panel(
         escape(preview),
-        title=f"[tool]{name}[/tool]",
-        border_style=_preset["tool_border"],
+        title=f"{status_tag}[tool]{name}[/tool]",
+        border_style=border,
         padding=(0, 1),
     ))
+
+
+def _print_result_notes(result: str):
+    """Affiche les lignes de résultat non couvertes par l'aperçu (check syntaxe, etc.)."""
+    lines = [l for l in result.split("\n")[1:] if l.strip()]
+    for line in lines[:5]:
+        style = "warn" if line.lstrip().startswith(("⚠", "Erreur")) else "dim"
+        console.print(f"  [{style}]{escape(line)}[/{style}]")
 
 
 # ── Tables ─────────────────────────────────────────────────────────────────
