@@ -130,9 +130,13 @@ def _to_anthropic_messages(messages: list):
 
 # ── Helpers HTTP ──────────────────────────────────────────────────────────────
 
+USER_AGENT = "odev/2.0"
+
+
 def _http_json(method: str, url: str, payload: dict = None, headers: dict = None, timeout: int = 300) -> dict:
     body = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("User-Agent", USER_AGENT)  # Cloudflare bloque le UA Python-urllib par défaut
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     if body is not None:
@@ -191,6 +195,7 @@ class OpenAICompatProvider:
     def _stream(self, payload):
         body = json.dumps(payload).encode()
         req = urllib.request.Request(f"{self.base}/chat/completions", data=body, method="POST")
+        req.add_header("User-Agent", USER_AGENT)
         for k, v in self._headers().items():
             req.add_header(k, v)
         req.add_header("Content-Type", "application/json")
@@ -297,6 +302,7 @@ class AnthropicProvider:
     def _stream(self, payload):
         body = json.dumps(payload).encode()
         req = urllib.request.Request(f"{self.base}/v1/messages", data=body, method="POST")
+        req.add_header("User-Agent", USER_AGENT)
         for k, v in self._headers().items():
             req.add_header(k, v)
         req.add_header("Content-Type", "application/json")
