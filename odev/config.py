@@ -37,6 +37,7 @@ DEFAULTS = {
     "repo_map": True,
     "compact": "trim",           # "trim" = troncature, "smart" = résumé par le modèle
     "ui_style": "codex",
+    "ui_compact": True,       # False = panneaux d'outils détaillés
     "editor": os.environ.get("EDITOR", "nano"),
 }
 

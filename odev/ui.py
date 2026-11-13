@@ -25,6 +25,20 @@ from .completion import setup as setup_completion
 
 MAX_PREVIEW_LINES = 60
 
+# Mode compact : les panneaux d'outils n'affichent qu'un petit aperçu
+# (le contenu complet reste dans l'historique du modèle, pas besoin de
+# noyer le terminal — comme les tool calls repliés de Devin/Claude Code).
+_compact = True
+
+
+def set_compact(enabled: bool):
+    global _compact
+    _compact = bool(enabled)
+
+
+def _preview_limit(default: int) -> int:
+    return 12 if _compact else default
+
 STYLE_PRESETS = {
     "codex": {
         "agent": "bold cyan",
@@ -493,9 +507,9 @@ def show_tool_result(name: str, result: str, full: bool = False):
     if name.startswith("subagent:"):
         agent_type = name[9:]
         lines = result.split("\n")
-        preview = "\n".join(lines[:MAX_PREVIEW_LINES])
-        if len(lines) > MAX_PREVIEW_LINES:
-            preview += f"\n[dim]… ({len(lines) - MAX_PREVIEW_LINES} lines more)[/dim]"
+        preview = "\n".join(lines[:_preview_limit(MAX_PREVIEW_LINES)])
+        if len(lines) > _preview_limit(MAX_PREVIEW_LINES):
+            preview += f"\n[dim]… ({len(lines) - _preview_limit(MAX_PREVIEW_LINES)} lines more)[/dim]"
         console.print(Panel(
             preview,
             title=f"[tool]subagent:{agent_type}[/tool]",
@@ -523,7 +537,7 @@ def show_tool_result(name: str, result: str, full: bool = False):
             old_text.splitlines(), new_text.splitlines(),
             fromfile="avant", tofile="après", lineterm="",
         ))
-        limit = MAX_PREVIEW_LINES * 3
+        limit = _preview_limit(MAX_PREVIEW_LINES * 3)
         body_lines = []
         for line in diff[:limit]:
             if line.startswith("+") and not line.startswith("+++"):
@@ -547,8 +561,9 @@ def show_tool_result(name: str, result: str, full: bool = False):
     if name == "write_file" and status == "ok" and args.get("content"):
         content = str(args["content"])
         all_lines = content.split("\n")
-        omitted = max(0, len(all_lines) - MAX_PREVIEW_LINES)
-        preview = "\n".join(all_lines[:MAX_PREVIEW_LINES])
+        limit = _preview_limit(MAX_PREVIEW_LINES)
+        omitted = max(0, len(all_lines) - limit)
+        preview = "\n".join(all_lines[:limit])
         console.print(Panel(
             _code_block(preview, args.get("path", "")),
             title=f"[tool]✎ write_file[/tool] [dim]{_preview(args.get('path', ''), 60)}[/dim]",
@@ -562,7 +577,7 @@ def show_tool_result(name: str, result: str, full: bool = False):
 
     # read_file : colorer le contenu selon l'extension du fichier
     if name == "read_file" and args.get("path"):
-        limit = MAX_PREVIEW_LINES * 4
+        limit = _preview_limit(MAX_PREVIEW_LINES * 4)
         lines = result.split("\n")
         omitted = max(0, len(lines) - limit)
         # Retire le marqueur de troncature _truncate avant coloration
@@ -575,10 +590,11 @@ def show_tool_result(name: str, result: str, full: bool = False):
             padding=(0, 1),
         ))
         if omitted:
-            console.print(f"  [dim]… ({omitted} lignes supplémentaires non affichées)[/dim]")
+            hint = " — contenu complet dans le contexte du modèle" if _compact else ""
+            console.print(f"  [dim]… ({omitted} lignes supplémentaires non affichées{hint})[/dim]")
         return
 
-    limit = MAX_PREVIEW_LINES * 4 if name in ("run_python",) else MAX_PREVIEW_LINES
+    limit = _preview_limit(MAX_PREVIEW_LINES * 4) if name in ("run_python",) else _preview_limit(MAX_PREVIEW_LINES)
     lines = result.split("\n")
     preview = "\n".join(lines[:limit])
     if len(lines) > limit:
@@ -648,6 +664,7 @@ CONFIG_DESCRIPTIONS = {
     "repo_map": "injecter la carte du dépôt dans le prompt",
     "compact": "trim = tronquer, smart = résumer via le modèle",
     "ui_style": "thème : codex | claude | gemini | nord | catppuccin",
+    "ui_compact": "True = aperçus d'outils courts, False = détaillé",
     "editor": "éditeur utilisé par /edit",
 }
 

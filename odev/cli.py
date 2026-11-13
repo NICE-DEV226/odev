@@ -295,6 +295,8 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
                     save_config(cfg)
                     if key == "ui_style":
                         apply_ui_style(str(cfg[key]))
+                    elif key == "ui_compact":
+                        ui.set_compact(bool(cfg[key]))
                     ui.console.print(f"[success]✓ {key} = {cfg[key]}[/success]")
                 except ValueError:
                     ui.console.print(f"[error]✗ Valeur invalide pour {key}[/error]")
@@ -323,6 +325,7 @@ def main():
 
     cfg = load_config()
     apply_ui_style(cfg.get("ui_style", "codex"))
+    ui.set_compact(cfg.get("ui_compact", True))
     if args.model:
         cfg["model"] = args.model
     if args.host:
