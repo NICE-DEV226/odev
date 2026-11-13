@@ -376,8 +376,6 @@ class Agent:
             {"role": "user", "content": task},
         ]
 
-        self.on_tool_start(f"subagent:{sub_agent_type}", {"task": task[:120] + ("…" if len(task) > 120 else "")})
-
         sub_messages = sub_agent.turn(self.cfg["model"], sub_messages)
 
         result_parts = []

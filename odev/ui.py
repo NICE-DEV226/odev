@@ -453,10 +453,10 @@ def bash_line(line: str):
 def show_tool_start(name: str, args: dict):
     global _bash_streaming, _last_tool_args
     _last_tool_args = args or {}
-    if name.startswith("subagent:"):
-        agent_type = name[9:]
+    if name == "subagent" or name.startswith("subagent:"):
+        agent_type = name[9:] if name.startswith("subagent:") else args.get("agent_type", "?")
         task = args.get("task", "")
-        console.print(f"\n  [tool]🔄 subagent:[/tool][tool]{agent_type}[/tool] [dim]{task}[/dim]")
+        console.print(f"\n  [tool]🔄 subagent:[/tool][tool]{agent_type}[/tool] [dim]{_preview(task, 100)}[/dim]")
         return
     icon = _TOOL_ICONS.get(name, "⚙")
     detail = ""
