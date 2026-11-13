@@ -77,21 +77,37 @@ def is_shell_command(text: str) -> bool:
     )
 
 
-def check_model(client, model: str) -> str:
+# Modèles non conversationnels fréquents sur les APIs (Groq, etc.) —
+# à exclure du fallback pour ne pas basculer sur whisper/TTS/gardes.
+_NON_CHAT_HINTS = ("whisper", "orpheus", "guard", "safeguard", "tts", "embed", "rerank")
+
+
+def _is_chat_model(name: str) -> bool:
+    n = name.lower()
+    return not any(h in n for h in _NON_CHAT_HINTS)
+
+
+def check_model(client, model: str, allow_fallback: bool = True):
+    """Retourne le nom du modèle à utiliser, ou None si introuvable
+    (quand allow_fallback=False — l'appelant garde son modèle courant)."""
     try:
         available = [m.model for m in client.list().models]
     except Exception:
-        ui.console.print(f"[error]✗ Impossible de contacter Ollama[/error]")
+        ui.console.print(f"[error]✗ Impossible de contacter le provider[/error]")
         sys.exit(1)
-    if model not in available:
-        ui.console.print(f"[warn]⚠ '{model}' non trouvé[/warn]")
-        ui.console.print(f"[dim]Disponibles : {', '.join(available)}[/dim]")
-        if available:
-            model = available[0]
-            ui.console.print(f"[dim]→ fallback sur {model}[/dim]")
-        else:
-            sys.exit(1)
-    return model
+    if model in available:
+        return model
+    ui.console.print(f"[warn]⚠ '{model}' non trouvé[/warn]")
+    ui.console.print(f"[dim]Disponibles : {', '.join(available)}[/dim]")
+    if not allow_fallback:
+        return None
+    chat_models = [m for m in available if _is_chat_model(m)]
+    pool = chat_models or available
+    if pool:
+        model = pool[0]
+        ui.console.print(f"[dim]→ fallback sur {model}[/dim]")
+        return model
+    sys.exit(1)
 
 
 def confirm_callback(message: str) -> bool:
@@ -141,8 +157,9 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
             ui.console.print()
             for m in client.list().models:
                 mark = "[agent]●[/agent]" if m.model == model else "[dim]○[/dim]"
-                size = f"{m.size / 1e9:.1f} Go"
-                ui.console.print(f"  {mark} {m.model}  [dim]{size}[/dim]")
+                size = f"{m.size / 1e9:.1f} Go" if getattr(m, "size", 0) else ""
+                tag = "" if _is_chat_model(m.model) else " [dim](non-chat)[/dim]"
+                ui.console.print(f"  {mark} {m.model}  [dim]{size}[/dim]{tag}")
             ui.console.print()
         except Exception as e:
             ui.console.print(f"[error]✗ {e}[/error]")
@@ -151,10 +168,18 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
         if len(parts) < 2:
             ui.console.print(f"[dim]actuel : {model}[/dim]")
         else:
-            new_model = check_model(client, parts[1].strip())
-            model = new_model
-            messages = [messages[0]]
-            ui.console.print(f"[dim]→ {model} (historique réinitialisé)[/dim]")
+            arg = parts[1].strip()
+            if arg.lower() in ("list", "ls"):
+                ui.console.print("[dim]Pour lister les modèles : /models[/dim]")
+                new_model = None
+            else:
+                new_model = check_model(client, arg, allow_fallback=False)
+            if new_model:
+                model = new_model
+                messages = [messages[0]]
+                ui.console.print(f"[dim]→ {model} (historique réinitialisé)[/dim]")
+            elif arg.lower() not in ("list", "ls"):
+                ui.console.print(f"[warn]Modèle inchangé : {model}[/warn]")
 
     elif action == "/cd":
         if len(parts) > 1:
