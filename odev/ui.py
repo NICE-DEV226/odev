@@ -3,6 +3,7 @@ odev.ui — Rendu terminal via Rich : markdown colorisé, thèmes complets, pann
 """
 
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -205,15 +206,17 @@ def show_question(question: str) -> str:
     return answer
 
 
-def show_user_prompt(cwd: str, memory: dict = None, agent_type: str = "auto") -> str:
+def show_user_prompt(cwd: str, memory: dict = None, agent_type: str = "auto", model: str = "") -> str:
     from .memory import is_project_mode as _is_proj
     setup_completion(cwd, memory)
     mode = " 📁" if _is_proj(cwd) else ""
     label = f"[dim]{Path(cwd).name}{mode}[/dim]"
     if agent_type != "auto":
         label += f" [tool]‹{agent_type}›[/tool]"
+    if model:
+        label += f" [dim]·[/dim] [dim]{model}[/dim]"
     console.print()
-    console.print(f"{label}")
+    console.print(f"[dim]{label}[/dim]")
     prompt = f"[user]{_preset['icon']}[/user]  "
     console.print(prompt, end="")
     try:
@@ -238,6 +241,42 @@ def show_thought(thought: str):
         padding=(0, 1),
         width=min(console.width, 120),
     ))
+
+
+# ── Indicateur d'attente modèle ────────────────────────────────────────────
+
+_wait_status = None
+_wait_t0 = 0.0
+
+
+class _WaitRenderable:
+    """Affiche 'réflexion… Ns' — le temps est recalculé à chaque refresh."""
+
+    def __rich__(self):
+        elapsed = time.monotonic() - _wait_t0
+        return Text(f"réflexion… {elapsed:.0f}s", style="dim")
+
+
+def start_wait():
+    """Démarre le spinner d'attente (thread-safe : appelé avant l'appel modèle)."""
+    global _wait_status, _wait_t0
+    stop_wait()
+    _wait_t0 = time.monotonic()
+    try:
+        _wait_status = console.status(_WaitRenderable(), spinner="dots")
+        _wait_status.start()
+    except Exception:
+        _wait_status = None
+
+
+def stop_wait():
+    global _wait_status
+    if _wait_status is not None:
+        try:
+            _wait_status.stop()
+        except Exception:
+            pass
+        _wait_status = None
 
 
 # ── Streaming live (Markdown temps réel) ──────────────────────────────────

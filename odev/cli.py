@@ -111,6 +111,8 @@ def make_agent(client, cfg, agent_type: str = "auto") -> Agent:
         on_stream_start=ui.start_stream,
         on_stream_token=ui.stream_token,
         on_stream_end=ui.end_stream,
+        on_wait_start=ui.start_wait,
+        on_wait_stop=ui.stop_wait,
     )
 
 
@@ -364,7 +366,7 @@ def main():
 
     while True:
         try:
-            inp = ui.show_user_prompt(os.getcwd(), memory, agent_type).strip()
+            inp = ui.show_user_prompt(os.getcwd(), memory, agent_type, model).strip()
         except (EOFError, KeyboardInterrupt):
             ui.console.print("\n[dim]À bientôt.[/dim]")
             if cfg.get("auto_save_session"):

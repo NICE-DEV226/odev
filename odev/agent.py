@@ -170,7 +170,7 @@ def trim_history(messages: list, max_messages: int) -> list:
 
 
 class Agent:
-    def __init__(self, client, cfg: dict, agent_type: str = "auto", confirm_callback=None, on_bash_line=None, on_text=None, on_tool_start=None, on_tool_result=None, on_thought=None, on_stream_start=None, on_stream_token=None, on_stream_end=None, depth: int = 0):
+    def __init__(self, client, cfg: dict, agent_type: str = "auto", confirm_callback=None, on_bash_line=None, on_text=None, on_tool_start=None, on_tool_result=None, on_thought=None, on_stream_start=None, on_stream_token=None, on_stream_end=None, on_wait_start=None, on_wait_stop=None, depth: int = 0):
         self.client = client
         self.cfg = cfg
         self.agent_type = agent_type
@@ -183,10 +183,13 @@ class Agent:
         self.on_stream_start = on_stream_start or (lambda: None)
         self.on_stream_token = on_stream_token or (lambda token: None)
         self.on_stream_end = on_stream_end or (lambda: None)
+        self.on_wait_start = on_wait_start or (lambda: None)
+        self.on_wait_stop = on_wait_stop or (lambda: None)
 
     def call_model(self, model: str, messages: list):
         tools = build_tools(self.agent_type)
         use_stream = bool(self.cfg.get("stream", True))
+        self.on_wait_start()
         try:
             resp = self.client.chat(
                 model=model,
@@ -201,6 +204,7 @@ class Agent:
                 },
             )
         except Exception as e:
+            self.on_wait_stop()
             log.error(f"appel modèle échoué: {e}")
             return f"[Erreur modèle] {e}", [], False
 
@@ -208,33 +212,46 @@ class Agent:
             raw_text_parts = []
             tool_calls = []
             started = False
-            for chunk in resp:
-                chunk_msg = getattr(chunk, "message", None)
-                if chunk_msg is None and isinstance(chunk, dict):
-                    chunk_msg = chunk.get("message")
-                if chunk_msg is None:
-                    continue
+            wait_open = True
+            try:
+                for chunk in resp:
+                    if wait_open:
+                        self.on_wait_stop()
+                        wait_open = False
+                    chunk_msg = getattr(chunk, "message", None)
+                    if chunk_msg is None and isinstance(chunk, dict):
+                        chunk_msg = chunk.get("message")
+                    if chunk_msg is None:
+                        continue
 
-                content = getattr(chunk_msg, "content", None)
-                if content is None and isinstance(chunk_msg, dict):
-                    content = chunk_msg.get("content")
-                if content:
-                    if not started:
-                        self.on_stream_start()
-                        started = True
-                    raw_text_parts.append(content)
-                    self.on_stream_token(content)
+                    content = getattr(chunk_msg, "content", None)
+                    if content is None and isinstance(chunk_msg, dict):
+                        content = chunk_msg.get("content")
+                    if content:
+                        if not started:
+                            self.on_stream_start()
+                            started = True
+                        raw_text_parts.append(content)
+                        self.on_stream_token(content)
 
-                chunk_calls = getattr(chunk_msg, "tool_calls", None)
-                if chunk_calls is None and isinstance(chunk_msg, dict):
-                    chunk_calls = chunk_msg.get("tool_calls")
-                if chunk_calls:
-                    tool_calls = list(chunk_calls)
+                    chunk_calls = getattr(chunk_msg, "tool_calls", None)
+                    if chunk_calls is None and isinstance(chunk_msg, dict):
+                        chunk_calls = chunk_msg.get("tool_calls")
+                    if chunk_calls:
+                        tool_calls = list(chunk_calls)
+            except Exception as e:
+                log.error(f"stream modèle échoué: {e}")
+                self.on_stream_end()
+                return f"[Erreur modèle] {e}", [], False
+            finally:
+                if wait_open:
+                    self.on_wait_stop()
 
             self.on_stream_end()
             raw_text = "".join(raw_text_parts)
             msg_tool_calls = tool_calls
         else:
+            self.on_wait_stop()
             msg = resp.message
             raw_text = msg.content or ""
             msg_tool_calls = list(msg.tool_calls or [])
