@@ -11,6 +11,7 @@ et .message.tool_calls) pour que Agent n'ait pas à connaître le provider.
 
 import json
 import os
+import time
 import urllib.request
 import urllib.error
 from types import SimpleNamespace
@@ -131,22 +132,40 @@ def _to_anthropic_messages(messages: list):
 # ── Helpers HTTP ──────────────────────────────────────────────────────────────
 
 USER_AGENT = "odev/2.0"
+MAX_RETRIES = 3
+RETRYABLE_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 def _http_json(method: str, url: str, payload: dict = None, headers: dict = None, timeout: int = 300) -> dict:
     body = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("User-Agent", USER_AGENT)  # Cloudflare bloque le UA Python-urllib par défaut
-    for k, v in (headers or {}).items():
-        req.add_header(k, v)
-    if body is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"HTTP {e.code} : {detail}") from e
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        req = urllib.request.Request(url, data=body, method=method)
+        req.add_header("User-Agent", USER_AGENT)  # Cloudflare bloque le UA Python-urllib par défaut
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:500]
+            last_error = RuntimeError(f"HTTP {e.code} : {detail}")
+            if e.code not in RETRYABLE_CODES or attempt == MAX_RETRIES:
+                raise last_error from e
+            retry_after = e.headers.get("Retry-After")
+            try:
+                delay = float(retry_after) if retry_after else min(2 ** attempt * 2, 30)
+            except ValueError:
+                delay = min(2 ** attempt * 2, 30)
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_error = RuntimeError(f"réseau : {e}")
+            if attempt == MAX_RETRIES:
+                raise last_error from e
+            time.sleep(min(2 ** attempt * 2, 30))
+    raise last_error
 
 
 def _sse_lines(resp) -> list:
@@ -154,6 +173,32 @@ def _sse_lines(resp) -> list:
         line = raw.decode("utf-8", errors="replace").strip()
         if line.startswith("data:"):
             yield line[5:].strip()
+
+
+def _open_stream(url: str, body: bytes, headers: dict, extra: dict = None):
+    """Ouvre un stream SSE avec retry sur codes retryables."""
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("User-Agent", USER_AGENT)
+        for k, v in headers.items():
+            req.add_header(k, v)
+        for k, v in (extra or {}).items():
+            req.add_header(k, v)
+        try:
+            return urllib.request.urlopen(req, timeout=300)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:300]
+            last_error = RuntimeError(f"HTTP {e.code} : {detail}")
+            if e.code not in RETRYABLE_CODES or attempt == MAX_RETRIES:
+                raise last_error from e
+            time.sleep(min(2 ** attempt * 2, 30))
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_error = RuntimeError(f"réseau : {e}")
+            if attempt == MAX_RETRIES:
+                raise last_error from e
+            time.sleep(min(2 ** attempt * 2, 30))
+    raise last_error
 
 
 # ── API compatible OpenAI (OpenAI, OpenRouter, Groq, Together, DeepSeek…) ─────
@@ -194,12 +239,8 @@ class OpenAICompatProvider:
 
     def _stream(self, payload):
         body = json.dumps(payload).encode()
-        req = urllib.request.Request(f"{self.base}/chat/completions", data=body, method="POST")
-        req.add_header("User-Agent", USER_AGENT)
-        for k, v in self._headers().items():
-            req.add_header(k, v)
-        req.add_header("Content-Type", "application/json")
-        resp = urllib.request.urlopen(req, timeout=300)
+        resp = _open_stream(f"{self.base}/chat/completions", body, self._headers(),
+                            extra={"Content-Type": "application/json"})
         return self._gen(resp)
 
     def _gen(self, resp):
@@ -301,13 +342,8 @@ class AnthropicProvider:
 
     def _stream(self, payload):
         body = json.dumps(payload).encode()
-        req = urllib.request.Request(f"{self.base}/v1/messages", data=body, method="POST")
-        req.add_header("User-Agent", USER_AGENT)
-        for k, v in self._headers().items():
-            req.add_header(k, v)
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Accept", "text/event-stream")
-        resp = urllib.request.urlopen(req, timeout=300)
+        resp = _open_stream(f"{self.base}/v1/messages", body, self._headers(),
+                            extra={"Content-Type": "application/json", "Accept": "text/event-stream"})
         return self._gen(resp)
 
     def _gen(self, resp):
