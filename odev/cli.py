@@ -34,16 +34,22 @@ from .sessions import list_sessions, save_session, load_session, delete_session
 from .agents import AGENT_TYPES, get_system_prompt
 from .agent import Agent
 from . import ui
+from . import repomap
 
 CURRENT_AGENT_TYPE = "auto"
 
 
-def build_system_prompt(memory: dict, agent_type: str = None) -> str:
+def build_system_prompt(memory: dict, agent_type: str = None, cfg: dict = None) -> str:
     base = get_system_prompt(agent_type or "auto")
+    parts = [base]
     memory_block = build_memory_block(memory)
-    if not memory_block:
-        return base
-    return base + "\n\n" + memory_block
+    if memory_block:
+        parts.append(memory_block)
+    if cfg is None or cfg.get("repo_map", True):
+        repo_map = repomap.get_repo_map()
+        if repo_map:
+            parts.append(repo_map + "\nUtilise cette carte pour naviguer ; read_file pour le détail.")
+    return "\n\n".join(parts)
 
 SHELL_BUILTINS = {
     "ls", "ll", "la", "pwd", "cat", "less", "head", "tail", "grep", "find",
@@ -181,7 +187,7 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
             chosen = parts[1].strip().lower()
             if chosen in AGENT_TYPES:
                 agent_type = chosen
-                messages[0]["content"] = build_system_prompt(memory, agent_type)
+                messages[0]["content"] = build_system_prompt(memory, agent_type, cfg)
                 ui.console.print(f"[success]✓ Agent : {AGENT_TYPES[chosen]['name']}[/success]")
             else:
                 ui.console.print(f"[warn]Agent inconnu. Disponibles : {', '.join(AGENT_TYPES)}[/warn]")
@@ -299,9 +305,9 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
 
     save_memory(memory)
     if messages:
-        messages[0]["content"] = build_system_prompt(memory, agent_type)
+        messages[0]["content"] = build_system_prompt(memory, agent_type, cfg)
     else:
-        messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+        messages = [{"role": "system", "content": build_system_prompt(memory, agent_type, cfg)}]
     return model, messages, memory, agent_type
 
 
@@ -322,20 +328,26 @@ def main():
 
     client = ollama.Client(host=cfg["ollama_host"])
     model = check_model(client, cfg["model"])
+    if cfg.get("num_ctx", 16384) < 32768:
+        ui.console.print(
+            f"[warn]⚠ num_ctx={cfg.get('num_ctx')} est faible pour un agent "
+            "(32k+ recommandé). L'historique sera tronqué plus vite — "
+            "/set num_ctx 65536 si votre VRAM le permet.[/warn]"
+        )
     loaded, errors = load_skills()
     memory = load_memory()
 
     agent_type = "auto"
-    messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+    messages = [{"role": "system", "content": build_system_prompt(memory, agent_type, cfg)}]
     if args.resume:
         result = load_session("_last")
         if result:
             model, messages, agent_type = result
             if not messages:
-                messages = [{"role": "system", "content": build_system_prompt(memory, agent_type)}]
+                messages = [{"role": "system", "content": build_system_prompt(memory, agent_type, cfg)}]
             elif messages[0].get("role") != "system":
-                messages.insert(0, {"role": "system", "content": build_system_prompt(memory, agent_type)})
-            messages[0]["content"] = build_system_prompt(memory, agent_type)
+                messages.insert(0, {"role": "system", "content": build_system_prompt(memory, agent_type, cfg)})
+            messages[0]["content"] = build_system_prompt(memory, agent_type, cfg)
 
     ui.banner(model, loaded, os.getcwd(), memory=memory, agent_type=agent_type)
     for e in errors:

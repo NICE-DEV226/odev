@@ -26,10 +26,13 @@ DEFAULTS = {
     "num_ctx": 16384,
     "temperature": 0.1,
     "max_history_messages": 60,   # au-delà, on compresse/tronque
+    "max_subagent_depth": 2,      # profondeur max de délégation subagent
     "bash_timeout": 60,
     "confirm_dangerous": True,
     "stream": True,
     "auto_save_session": True,
+    "repo_map": True,
+    "compact": "trim",           # "trim" = troncature, "smart" = résumé par le modèle
     "ui_style": "codex",
     "editor": os.environ.get("EDITOR", "nano"),
 }

@@ -310,6 +310,7 @@ _TOOL_ICONS = {
     "git": "⎇",
     "http_get": "🌐",
     "question": "❓",
+    "todo": "☑",
 }
 
 
