@@ -271,8 +271,7 @@ def handle_slash(cmd: str, model: str, messages: list, client, cfg: dict, memory
         ui.show_sessions_table(list_sessions())
 
     elif action == "/config":
-        for k, v in cfg.items():
-            ui.console.print(f"  [dim]{k}[/dim] = {v}")
+        ui.show_config_table(cfg)
 
     elif action == "/set":
         if len(parts) < 2 or len(parts[1].split(None, 1)) < 2:

@@ -287,10 +287,36 @@ _live: Optional[Live] = None
 _stream_buffer: list[str] = []
 
 
+_NOTICE_RE = re.compile(r"^\[(Erreur modèle|odev|compact)\]")
+
+
+def _notice_panel(text: str):
+    """Panneau pour les notices système : erreurs modèle, loop guard, compact."""
+    if text.startswith("[Erreur modèle]"):
+        title, border, style = "erreur modèle", _preset["error"], "error"
+        body = text.replace("[Erreur modèle]", "", 1).strip()
+    elif text.startswith("[compact]"):
+        title, border, style = "compact", _preset["tool_border"], "dim"
+        body = text.replace("[compact]", "", 1).strip()
+    else:
+        title, border, style = "odev", _preset["warn"], "warn"
+        body = text.replace("[odev]", "", 1).strip()
+    console.print()
+    console.print(Panel(
+        f"[{style}]{escape(body)}[/{style}]",
+        title=f"[dim]{_preset['icon']} {title}[/dim]",
+        border_style=border,
+        padding=(0, 1),
+    ))
+
+
 def show_text(text: str):
     if not text.strip():
         return
     console.print()
+    if _NOTICE_RE.match(text.strip()):
+        _notice_panel(text.strip())
+        return
     console.print(f"[agent]{_preset['icon']} odev[/agent]")
     try:
         md = _render_md(text)
@@ -603,25 +629,71 @@ def show_sessions_table(sessions: list):
     console.print(table)
 
 
+CONFIG_DESCRIPTIONS = {
+    "model": "modèle LLM utilisé",
+    "provider": "backend : ollama | openai | anthropic",
+    "api_base": "URL de base API (vide = défaut du provider)",
+    "api_key_env": "variable d'env contenant la clé API",
+    "ollama_host": "URL du serveur Ollama",
+    "keep_alive": "durée de maintien du modèle en mémoire",
+    "max_loops": "itérations max de la boucle agent par tour",
+    "num_ctx": "taille du contexte (tokens)",
+    "temperature": "créativité du modèle (0 = déterministe)",
+    "max_history_messages": "messages conservés dans l'historique",
+    "max_subagent_depth": "profondeur max de délégation subagent",
+    "bash_timeout": "timeout des commandes bash (secondes)",
+    "confirm_dangerous": "demander confirmation avant commandes risquées",
+    "stream": "afficher la réponse en streaming",
+    "auto_save_session": "sauvegarder la session automatiquement",
+    "repo_map": "injecter la carte du dépôt dans le prompt",
+    "compact": "trim = tronquer, smart = résumer via le modèle",
+    "ui_style": "thème : codex | claude | gemini | nord | catppuccin",
+    "editor": "éditeur utilisé par /edit",
+}
+
+
+def show_config_table(cfg: dict):
+    table = Table(border_style=_preset["tool_border"], show_header=True,
+                  header_style="bold", box=box.SIMPLE)
+    table.add_column("Clé", style="tool")
+    table.add_column("Valeur")
+    table.add_column("Description", style="dim")
+    for key in sorted(cfg):
+        table.add_row(key, str(cfg[key]), CONFIG_DESCRIPTIONS.get(key, ""))
+    console.print(table)
+
+
+_HELP_COMMANDS = [
+    ("/agent <type>", "changer d'agent spécialisé (auto, coder, reviewer, explorer, planner, debugger)"),
+    ("/model <nom>", "changer de modèle (historique réinitialisé)"),
+    ("/models", "lister les modèles disponibles"),
+    ("/theme <style>", "changer le thème UI (codex, claude, gemini, nord, catppuccin)"),
+    ("/skills", "lister les skills actifs"),
+    ("/reload", "recharger les skills depuis le disque"),
+    ("/memory", "afficher la mémoire persistante"),
+    ("/summary [texte]", "voir ou définir le résumé projet"),
+    ("/task <texte> /done <id> /tasks", "gestion des tâches"),
+    ("/note <texte>", "ajouter une note à la mémoire"),
+    ("/init", "initialiser la mémoire projet (.odev/)"),
+    ("/save /load /sessions", "gérer les sessions"),
+    ("/cd <path>", "changer de dossier de travail"),
+    ("/config /set <k> <v>", "voir / modifier la configuration"),
+    ("/clear", "vider l'historique de conversation"),
+    ("/exit", "quitter"),
+]
+
+
 def help_panel(skills_dir: Path):
+    table = Table(border_style=_preset["tool_border"], show_header=False,
+                  box=box.SIMPLE, padding=(0, 2))
+    table.add_column("Commande", style="tool", no_wrap=True)
+    table.add_column("Description", style="dim")
+    for cmd, desc in _HELP_COMMANDS:
+        table.add_row(cmd, desc)
     console.print(Panel(
-        f"[dim]{_preset['icon']} /theme <codex|claude|gemini|nord|catppuccin>[/dim]  switch UI style\n"
-        f"[dim]{_preset['icon']} /agent <type>[/dim]                changer d'agent spécialisé\n"
-        f"[dim]{_preset['icon']} /model <nom>[/dim]                 changer de modèle\n"
-        f"[dim]{_preset['icon']} /models[/dim]                      lister les modèles Ollama\n"
-        f"[dim]{_preset['icon']} /skills[/dim]                      lister les skills actifs\n"
-        f"[dim]{_preset['icon']} /reload[/dim]                      recharger les skills\n"
-        f"[dim]{_preset['icon']} /memory[/dim]                      afficher la mémoire\n"
-        f"[dim]{_preset['icon']} /summary[/dim]                     résumé projet\n"
-        f"[dim]{_preset['icon']} /tasks /task /done[/dim]           gestion des tâches\n"
-        f"[dim]{_preset['icon']} /note <texte>[/dim]                ajouter une note\n"
-        f"[dim]{_preset['icon']} /save /load /sessions[/dim]        sessions\n"
-        f"[dim]{_preset['icon']} /clear[/dim]                       vider l'historique\n"
-        f"[dim]{_preset['icon']} /cd <path>[/dim]                   changer de dossier\n"
-        f"[dim]{_preset['icon']} /config /set[/dim]                 configuration\n"
-        f"[dim]{_preset['icon']} /exit[/dim]                        quitter\n\n"
-        f"[dim]Skills : {skills_dir}[/dim]",
+        table,
         title=f"[agent]{_preset['icon']} odev — {get_style()}[/agent]",
+        subtitle=f"[dim]skills : {skills_dir}[/dim]",
         border_style=_preset["border"],
-        padding=(0, 2),
+        padding=(0, 1),
     ))
