@@ -252,6 +252,10 @@ class OpenAICompatProvider:
                 chunk = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            err = chunk.get("error")
+            if err:
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                raise RuntimeError(f"API : {msg}")
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -359,6 +363,10 @@ class AnthropicProvider:
                     obj = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if obj.get("type") == "error" or obj.get("error"):
+                    err = obj.get("error") or {}
+                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    raise RuntimeError(f"API : {msg}")
                 if current_event == "content_block_start":
                     cb = obj.get("content_block") or {}
                     if cb.get("type") == "tool_use":

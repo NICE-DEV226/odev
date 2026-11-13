@@ -391,6 +391,25 @@ class ProviderConversionTests(unittest.TestCase):
             self.assertEqual(result["type"], "tool_result")
             self.assertEqual(result["tool_use_id"], tool_use["id"])
 
+    def test_openai_stream_surfaces_sse_error(self):
+        """Un événement error SSE (ex. Groq tool_use_failed) doit lever une
+        exception au lieu de produire une réponse vide silencieuse."""
+        with tempfile.TemporaryDirectory() as tmp:
+            providers_module = import_with_temp_home("odev.providers", Path(tmp) / "home")
+            provider = providers_module.OpenAICompatProvider("https://x", "k")
+
+            class _Resp:
+                def __iter__(self):
+                    yield b'data: {"choices": [{"delta": {"content": "ok"}}]}\n\n'
+                    yield b'data: {"error": {"message": "tool_use_failed", "code": "tool_use_failed"}}\n\n'
+
+            gen = provider._gen(_Resp())
+            chunks = []
+            with self.assertRaises(RuntimeError) as ctx:
+                for c in gen:
+                    chunks.append(c)
+            self.assertIn("tool_use_failed", str(ctx.exception))
+
 
 class SessionNameTests(unittest.TestCase):
     def test_session_name_sanitized(self):
